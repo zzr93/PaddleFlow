@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,12 +55,14 @@ const (
 	TmpPath          = "./tmp/pfs/"
 	MaxFileSize      = 5 * 1024 * 1024 * 1024 * 1024 // s3: support upto 5 TiB file size
 	// mpu
-	MPURetryTimes  = 2
-	MPUThreshold   = 200 * 1024 * 1024      // customized for performance
-	MPUChunkSize   = 1 * 1024 * 1024 * 1024 // chunk size 1 GiB
-	MPUMinPartSize = 5 * 1024 * 1024        // s3: Each part must be at least 5 MB ~ 5 GB in size (except for the last part)
-	MPUMaxPartSize = 5 * 1024 * 1024 * 1024 // s3: Each part must be at least 5 MB ~ 5 GB in size (except for the last part)
-	MPUMaxPartNum  = 10000                  // s3: between 1~10,000
+	MPURetryTimes   = 2
+	MPUThreshold    = 200 * 1024 * 1024      // customized for performance
+	MPUChunkSize    = 1 * 1024 * 1024 * 1024 // chunk size 1 GiB
+	MPUMinPartSize  = 5 * 1024 * 1024        // s3: Each part must be at least 5 MB ~ 5 GB in size (except for the last part)
+	MPUMaxPartSize  = 5 * 1024 * 1024 * 1024 // s3: Each part must be at least 5 MB ~ 5 GB in size (except for the last part)
+	MPUMaxPartNum   = 10000                  // s3: between 1~10,000
+	DefaultDirMode  = 0755
+	DefaultFileMode = 0644
 )
 
 var Owner string
@@ -68,6 +71,8 @@ var Group string
 type s3FileSystem struct {
 	bucket      string
 	subpath     string // bucket:subpath/name
+	dirMode     int
+	fileMode    int
 	sess        *session.Session
 	s3          *s3.S3
 	defaultTime time.Time
@@ -236,7 +241,7 @@ func (fs *s3FileSystem) getRootDirAttr() *base.FileInfo {
 	// 参考bosfs的做法，启动时记录一个默认时间，目录时间属性频繁变化会导致tar压缩目录失败。
 	aTime := fuse.UtimeToTimespec(&fs.defaultTime)
 	var perm uint32
-	perm = syscall.S_IFDIR | 0777
+	perm = uint32(syscall.S_IFDIR | fs.dirMode)
 	uid := uint32(utils.LookupUser(Owner))
 	gid := uint32(utils.LookupGroup(Group))
 
@@ -270,35 +275,55 @@ func (fs *s3FileSystem) isDirExist(name string) error {
 	path := fs.getFullPath(name)
 	// when s3 prefix/dir has no s3 object key, cannot be list
 	// thus list object under it to check existence
-	var errList error
-	var fsInfos []base.FileInfo
-	var wg sync.WaitGroup
-	var errObject error
-	// todo: 用chan实现，不需要等待全部返回后在继续
-	wg.Add(2)
+	dirChan := make(chan []base.FileInfo, 1)
+	objectChan := make(chan s3.HeadObjectOutput, 1)
+	errObjectChan := make(chan error, 1)
+	errDirChan := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		fsInfos, _, errList = fs.list(name, "", 1, true)
+		dirs, _, err := fs.list(name, "", 1, true)
+		if err != nil {
+			errDirChan <- err
+			return
+		}
+		dirChan <- dirs
 	}()
 	go func() {
-		defer wg.Done()
 		request := &s3.HeadObjectInput{
 			Bucket: &fs.bucket,
 			Key:    &path,
 		}
-		_, errObject = fs.s3.HeadObject(request)
+		object, err := fs.s3.HeadObject(request)
+		if err != nil {
+			errObjectChan <- err
+			return
+		}
+		objectChan <- *object
 	}()
-	wg.Wait()
-	if len(fsInfos) > 0 || errObject == nil {
-		return nil
+
+	var objectNotFound bool
+	var listDirsEmpty bool
+	for {
+		select {
+		case resp := <-errDirChan:
+			return resp
+		case resp := <-errObjectChan:
+			if !isNotExistErr(resp) {
+				log.Errorf("isDirExist object err: %v", resp)
+				return resp
+			}
+			objectNotFound = true
+		case <-objectChan:
+			return nil
+		case resp := <-dirChan:
+			if len(resp) > 0 {
+				return nil
+			}
+			listDirsEmpty = true
+		}
+		if listDirsEmpty && objectNotFound {
+			return syscall.ENOENT
+		}
 	}
-	if errList != nil {
-		return errList
-	}
-	if len(fsInfos) == 0 {
-		return syscall.ENOENT
-	}
-	return nil
 }
 
 // object_path may point to an object or a directory, we need to distinguish between
@@ -338,12 +363,12 @@ func (fs *s3FileSystem) GetAttr(name string) (*base.FileInfo, error) {
 
 	size := *response.ContentLength
 	isDir := strings.HasSuffix(path, Delimiter)
-	mode := syscall.S_IFREG | 0666
+	mode := syscall.S_IFREG | fs.fileMode
 
 	// if empty directory, s3 will return size=0
 	if isDir {
 		size = 4096
-		mode = syscall.S_IFDIR | 0777
+		mode = syscall.S_IFDIR | fs.dirMode
 	}
 
 	uid := uint32(utils.LookupUser(Owner))
@@ -869,12 +894,12 @@ func (fs *s3FileSystem) ReadDir(name string) ([]DirEntry, error) {
 		}
 		mtime := int64(finfo.Mtime)
 		size := finfo.Size
-		mode := syscall.S_IFREG | 0666
+		mode := syscall.S_IFREG | fs.fileMode
 		isDir := finfo.IsDir
 		fileType := uint8(TypeFile)
 		if isDir {
 			fileType = TypeDirectory
-			mode = syscall.S_IFDIR | 0755
+			mode = syscall.S_IFDIR | fs.dirMode
 			size = 4096
 		}
 		uid := uint32(utils.LookupUser(Owner))
@@ -1382,6 +1407,26 @@ func NewS3FileSystem(properties map[string]interface{}) (UnderFileStorage, error
 	bucket := properties[fsCommon.Bucket].(string)
 	region := properties[fsCommon.Region].(string)
 	subpath := properties[fsCommon.SubPath].(string)
+	dirMode_, ok := properties[fsCommon.DirMode].(string)
+	var dirMode, fileMode int
+	var err error
+	if ok {
+		dirMode, err = strconv.Atoi(dirMode_)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		dirMode = DefaultDirMode
+	}
+	fileMode_, ok := properties[fsCommon.FileMode].(string)
+	if ok {
+		fileMode, err = strconv.Atoi(fileMode_)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fileMode = DefaultFileMode
+	}
 
 	endpoint = strings.TrimSuffix(endpoint, Delimiter)
 	bucket = strings.TrimSuffix(bucket, Delimiter)
@@ -1429,6 +1474,8 @@ func NewS3FileSystem(properties map[string]interface{}) (UnderFileStorage, error
 	fs := &s3FileSystem{
 		bucket:      bucket,
 		subpath:     tidySubpath(subpath),
+		dirMode:     dirMode,
+		fileMode:    fileMode,
 		sess:        sess,
 		s3:          s3.New(sess),
 		defaultTime: time.Now(),

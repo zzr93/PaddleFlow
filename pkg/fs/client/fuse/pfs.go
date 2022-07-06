@@ -35,11 +35,15 @@ type FuseConfig struct {
 	RawOwner     bool
 	EntryTimeout int
 	AttrTimeout  int
+	DirMode      int
+	FileMode     int
 }
 
 var FuseConf = &FuseConfig{
 	EntryTimeout: 1,
 	AttrTimeout:  1,
+	DirMode:      0755,
+	FileMode:     0644,
 	Uid:          os.Getuid(),
 	Gid:          os.Getgid(),
 	RawOwner:     false,
@@ -137,21 +141,21 @@ func (fs *PFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, o
 }
 
 func (fs *PFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
-	log.Debugf("pfs POSIX Unlink: header[%+v], name[%s]", *header, name)
+	log.Infof("pfs POSIX Unlink: header[%+v], name[%s]", *header, name)
 	ctx := meta.NewContext(cancel, header.Uid, header.Pid, header.Gid)
 	code := vfs.GetVFS().Unlink(ctx, vfs.Ino(header.NodeId), name)
 	return fuse.Status(code)
 }
 
 func (fs *PFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
-	log.Debugf("pfs POSIX Rmdir: header[%+v] name[%s]", *header, name)
+	log.Infof("pfs POSIX Rmdir: header[%+v] name[%s]", *header, name)
 	ctx := meta.NewContext(cancel, header.Uid, header.Pid, header.Gid)
 	code := vfs.GetVFS().Rmdir(ctx, vfs.Ino(header.NodeId), name)
 	return fuse.Status(code)
 }
 
 func (fs *PFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName string, newName string) fuse.Status {
-	log.Debugf("pfs POSIX Rename: input[%+v] oldNamename[%s] newName[%s]", *input, oldName, newName)
+	log.Infof("pfs POSIX Rename: input[%+v] oldNamename[%s] newName[%s]", *input, oldName, newName)
 	ctx := meta.NewContext(cancel, input.Uid, input.Pid, input.Gid)
 	code := vfs.GetVFS().Rename(ctx, vfs.Ino(input.NodeId), oldName, vfs.Ino(input.Newdir), newName, input.Flags)
 	return fuse.Status(code)

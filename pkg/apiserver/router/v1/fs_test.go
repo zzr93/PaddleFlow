@@ -462,14 +462,30 @@ func TestCreateFSAndDeleteFs(t *testing.T) {
 	result, err := PerformPostRequest(router, fsUrl, createFsReq)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusCreated, result.Code)
-
-	var p1 = gomonkey.ApplyFunc(fs.DeletePvPvc, func(fsID string) error {
-		return nil
-	})
-	defer p1.Reset()
-
+	// test delete fs successful
+	var p1 = gomonkey.ApplyMethod(reflect.TypeOf(fs.GetFileSystemService()), "CheckFsMountedAndCleanResources",
+		func(_ *fs.FileSystemService, fsID string) (bool, error) {
+			return false, nil
+		})
 	deleteUrl := fsUrl + "/" + mockFsName
 	result, err = PerformDeleteRequest(router, deleteUrl)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusOK, result.Code)
+
+	p1.Reset()
+
+	// test fs mounted
+	p1 = gomonkey.ApplyMethod(reflect.TypeOf(fs.GetFileSystemService()), "CheckFsMountedAndCleanResources",
+		func(_ *fs.FileSystemService, fsID string) (bool, error) {
+			return true, nil
+		})
+	defer p1.Reset()
+	result, err = PerformPostRequest(router, fsUrl, createFsReq)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusCreated, result.Code)
+
+	deleteUrl = fsUrl + "/" + mockFsName
+	result, err = PerformDeleteRequest(router, deleteUrl)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusForbidden, result.Code)
 }

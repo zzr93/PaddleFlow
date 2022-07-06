@@ -58,7 +58,7 @@ func (pr *PFSRouter) createFSCacheConfig(w http.ResponseWriter, r *http.Request)
 	createRequest.FsID = common.ID(realUserName, createRequest.FsName)
 	ctx.Logging().Tracef("create file system cache with req[%v]", createRequest)
 	// validate can be modified
-	if err := fsCheckCanModify(&ctx, createRequest.FsID); err != nil {
+	if err := fsExistsForModify(&ctx, createRequest.FsID); err != nil {
 		ctx.Logging().Errorf("checkCanModifyFs[%s] err: %v", createRequest.FsID, err)
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
@@ -103,7 +103,8 @@ func validateCacheConfigCreate(ctx *logger.RequestContext, req *api.UpdateFileSy
 		return err
 	}
 	// must assign cacheDir when cache in use
-	if (req.BlockSize > 0 || req.MetaDriver != schema.FsMetaDefault) && req.CacheDir == "" {
+	if (req.BlockSize > 0 || req.MetaDriver == schema.FsMetaLevelDB || req.MetaDriver == schema.FsMetaNutsDB) &&
+		req.CacheDir == "" {
 		ctx.ErrorCode = common.InvalidArguments
 		err := fmt.Errorf("fs cacheDir[%s] should be an absolute path when cache in use", req.CacheDir)
 		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
@@ -140,6 +141,13 @@ func (pr *PFSRouter) updateFSCacheConfig(w http.ResponseWriter, r *http.Request)
 	realUserName := getRealUserName(&ctx, username)
 	req.FsID = common.ID(realUserName, fsName)
 
+	// validate can be modified
+	if err := fsExistsForModify(&ctx, req.FsID); err != nil {
+		ctx.Logging().Errorf("checkCanModifyFs[%s] err: %v", req.FsID, err)
+		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
+		return
+	}
+
 	// validate fs_cache_config existence
 	prev, err := api.GetFileSystemCacheConfig(&ctx, req.FsID)
 	if err != nil {
@@ -153,12 +161,6 @@ func (pr *PFSRouter) updateFSCacheConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// validate can be modified
-	if err := fsCheckCanModify(&ctx, req.FsID); err != nil {
-		ctx.Logging().Errorf("checkCanModifyFs[%s] err: %v", req.FsID, err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
 	// validate request
 	if err := validateCacheConfigUpdate(&ctx, req, prev); err != nil {
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
@@ -206,13 +208,13 @@ func validateCacheConfigUpdate(ctx *logger.RequestContext, req api.UpdateFileSys
 }
 
 func needCacheDir(req api.UpdateFileSystemCacheRequest, prev api.FileSystemCacheResponse) bool {
-	if req.MetaDriver != "" && req.MetaDriver != schema.FsMetaDefault {
+	if req.MetaDriver == schema.FsMetaLevelDB || req.MetaDriver == schema.FsMetaNutsDB {
 		return true
 	}
 	if req.BlockSize > 0 {
 		return true
 	}
-	if prev.MetaDriver != schema.FsMetaDefault || prev.BlockSize > 0 {
+	if prev.MetaDriver == schema.FsMetaLevelDB || prev.MetaDriver == schema.FsMetaNutsDB || prev.BlockSize > 0 {
 		return true
 	}
 	return false
@@ -273,8 +275,21 @@ func (pr *PFSRouter) deleteFSCacheConfig(w http.ResponseWriter, r *http.Request)
 	realUserName := getRealUserName(&ctx, username)
 	fsID := common.ID(realUserName, fsName)
 
-	if err := fsCheckCanModify(&ctx, fsID); err != nil {
+	if err := fsExistsForModify(&ctx, fsID); err != nil {
 		ctx.Logging().Errorf("checkCanModifyFs[%s] err: %v", fsID, err)
+		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
+		return
+	}
+
+	// validate fs_cache_config existence
+	_, err := api.GetFileSystemCacheConfig(&ctx, fsID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			ctx.ErrorCode = common.RecordNotFound
+		} else {
+			ctx.ErrorCode = common.InternalError
+		}
+		logger.LoggerForRequest(&ctx).Errorf("validate fs_cache_config[%s] failed. error:%v", fsID, err)
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
 	}

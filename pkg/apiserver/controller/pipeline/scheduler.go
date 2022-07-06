@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
 )
@@ -135,11 +137,19 @@ func (s *Scheduler) Start() {
 		}
 
 		if toUpdate {
-			logger.Logger().Infof("update nextWakeupTime, origin:[%s], new:[%s]", nextWakeupTime.Format("2006-01-02 15:04:05"), tmpNextWakeupTime.Format("2006-01-02 15:04:05"))
+			logger.Logger().Infof("update nextWakeupTime, origin:[%s], new:[%s]", s.formatTime(nextWakeupTime), s.formatTime(tmpNextWakeupTime))
 			nextWakeupTime = tmpNextWakeupTime
 			timeout = s.getTimeout(nextWakeupTime)
 			toUpdate = false
 		}
+	}
+}
+
+func (s *Scheduler) formatTime(timeToFormat *time.Time) string {
+	if timeToFormat == nil {
+		return "None"
+	} else {
+		return timeToFormat.Format("2006-01-02 15:04:05")
 	}
 }
 
@@ -231,7 +241,13 @@ func (s *Scheduler) dealWithTimout(checkCatchup bool) (*time.Time, error) {
 				ScheduleID:       schedule.ID,
 				ScheduledAt:      nextRunAt.Format("2006-01-02 15:04:05"),
 			}
-			_, err := CreateRun(schedule.UserName, &createRequest)
+
+			// generate request id for run create
+			ctx := logger.RequestContext{
+				UserName:  schedule.UserName,
+				RequestID: uuid.NewString(),
+			}
+			_, err := CreateRun(ctx, &createRequest)
 			if err != nil {
 				logger.Logger().Errorf("create run for schedule[%s] in ScheduledAt[%s] failed, err:[%s]", scheduleID, nextRunAt.Format("2006-01-02 15:04:05"), err.Error())
 				continue
