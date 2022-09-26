@@ -38,8 +38,9 @@ type Run struct {
 	Name           string                 `gorm:"type:varchar(60);not null"         json:"name"`
 	Source         string                 `gorm:"type:varchar(256);not null"        json:"source"` // pipelineID or yamlPath
 	UserName       string                 `gorm:"type:varchar(60);not null"         json:"username"`
-	GlobalFsID     string                 `gorm:"type:varchar(60);not null"         json:"-"`
-	GlobalFsName   string                 `gorm:"type:varchar(60);not null"         json:"globalFsName"`
+	FsID           string                 `gorm:"type:varchar(60);not null"         json:"-"`
+	FsName         string                 `gorm:"type:varchar(60);not null"         json:"fsName"`
+	FsOptions      schema.FsOptions       `gorm:"-"                                 json:"fsOptions"`
 	Description    string                 `gorm:"type:text;size:65535;not null"     json:"description"`
 	ParametersJson string                 `gorm:"type:text;size:65535;not null"     json:"-"`
 	Parameters     map[string]interface{} `gorm:"-"                                 json:"parameters"`
@@ -53,11 +54,13 @@ type Run struct {
 	ScheduleID     string                 `gorm:"type:varchar(60);not null"         json:"scheduleID"`
 	Message        string                 `gorm:"type:text;size:65535;not null"     json:"runMsg"`
 	Status         string                 `gorm:"type:varchar(32);not null"         json:"status"` // StatusRun%%%
+	RunOptions     schema.RunOptions      `gorm:"-"                                 json:"-"`
+	RunOptionsJson string                 `gorm:"type:text;size:65535;not null"     json:"-"`
 	RunCachedIDs   string                 `gorm:"type:text;size:65535;not null"     json:"runCachedIDs"`
 	ScheduledAt    sql.NullTime           `                                         json:"-"`
 	CreateTime     string                 `gorm:"-"                                 json:"createTime"`
 	ActivateTime   string                 `gorm:"-"                                 json:"activateTime"`
-	UpdateTime     string                 `gorm:"-"                                 json:"updateTime,omitempty"`
+	UpdateTime     string                 `gorm:"-"                                 json:"updateTime"`
 	CreatedAt      time.Time              `                                         json:"-"`
 	ActivatedAt    sql.NullTime           `                                         json:"-"`
 	UpdatedAt      time.Time              `                                         json:"-"`
@@ -90,6 +93,13 @@ func (r *Run) Encode() error {
 		}
 		r.ParametersJson = string(paramRaw)
 	}
+
+	optionsJson, err := json.Marshal(r.RunOptions)
+	if err != nil {
+		logger.LoggerForRun(r.ID).Errorf("encode run options failed. error:%v", err)
+		return err
+	}
+	r.RunOptionsJson = string(optionsJson)
 	return nil
 }
 
@@ -108,7 +118,6 @@ func (r *Run) decode() error {
 		logger.Logger().Errorf("validateRuntimeAndPostProcess in run decode failed, error: %s", err.Error())
 		return err
 	}
-	logger.Logger().Infof("debug: validateRuntimeAndPostProcess finish")
 
 	// decode param
 	if len(r.ParametersJson) > 0 {
@@ -119,6 +128,16 @@ func (r *Run) decode() error {
 		}
 		r.Parameters = param
 	}
+
+	runOptions := schema.RunOptions{}
+	if err := json.Unmarshal([]byte(r.RunOptionsJson), &runOptions); err != nil {
+		logger.LoggerForRun(r.ID).Errorf("decode run options failed. error:%v", err)
+		return err
+	}
+	r.RunOptions = runOptions
+
+	r.FsOptions.MainFS = r.WorkflowSource.FsOptions.MainFS
+
 	// format time
 	r.CreateTime = r.CreatedAt.Format("2006-01-02 15:04:05")
 	r.UpdateTime = r.UpdatedAt.Format("2006-01-02 15:04:05")
@@ -169,14 +188,14 @@ func (r *Run) validateRuntimeAndPostProcess() error {
 		}
 	}
 
-	if err := r.initRuntime(runtimeJobs, runDags); err != nil {
+	if err := r.InitRuntime(runtimeJobs, runDags); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (r *Run) initRuntime(jobs []RunJob, dags []RunDag) error {
+func (r *Run) InitRuntime(jobs []RunJob, dags []RunDag) error {
 
 	// runtimeView
 	runtimeView := map[string][]schema.ComponentView{}
@@ -292,7 +311,7 @@ func (r *Run) ProcessRuntimeView(componentViews map[string][]schema.ComponentVie
 
 func CreateRun(logEntry *log.Entry, run *Run) (string, error) {
 	logEntry.Debugf("begin create run:%+v", run)
-	err := WithTransaction(storage.DB, func(tx *gorm.DB) error {
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&Run{}).Create(run)
 		if result.Error != nil {
 			logEntry.Errorf("create run failed. run:%v, error:%s",
@@ -339,14 +358,14 @@ func UpdateRun(logEntry *log.Entry, runID string, run Run) error {
 
 func DeleteRun(logEntry *log.Entry, runID string) error {
 	logEntry.Debugf("begin delete run. runID:%s", runID)
-	err := WithTransaction(storage.DB, func(tx *gorm.DB) error {
-		result := storage.DB.Model(&RunJob{}).Where("run_id = ?", runID).Delete(&RunJob{})
+	err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&RunJob{}).Where("run_id = ?", runID).Delete(&RunJob{})
 		if result.Error != nil {
 			logEntry.Errorf("delete run_job before deleting run failed. runID:%s, error:%s",
 				runID, result.Error.Error())
 			return result.Error
 		}
-		result = storage.DB.Model(&Run{}).Where("id = ?", runID).Delete(&Run{})
+		result = tx.Model(&Run{}).Where("id = ?", runID).Delete(&Run{})
 		if result.Error != nil {
 			logEntry.Errorf("delete run failed. runID:%s, error:%s",
 				runID, result.Error.Error())
@@ -379,7 +398,7 @@ func ListRun(logEntry *log.Entry, pk int64, maxKeys int, userFilter, fsFilter, r
 		tx = tx.Where("user_name IN (?)", userFilter)
 	}
 	if len(fsFilter) > 0 {
-		tx = tx.Where("global_fs_name IN (?)", fsFilter)
+		tx = tx.Where("fs_name IN (?)", fsFilter)
 	}
 	if len(runFilter) > 0 {
 		tx = tx.Where("id IN (?)", runFilter)
@@ -432,7 +451,7 @@ func CountRun(logEntry *log.Entry, pk int64, maxKeys int, userFilter, fsFilter, 
 		tx = tx.Where("user_name IN (?)", userFilter)
 	}
 	if len(fsFilter) > 0 {
-		tx = tx.Where("global_fs_name IN (?)", fsFilter)
+		tx = tx.Where("fs_name IN (?)", fsFilter)
 	}
 	if len(runFilter) > 0 {
 		tx = tx.Where("id IN (?)", runFilter)

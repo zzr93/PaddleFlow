@@ -126,7 +126,7 @@ func (s *ComponentParamChecker) checkDuplication(currentComponent string) error 
 	return nil
 }
 
-func (s *ComponentParamChecker) Check(currentComponent string, isOuterComp bool) error {
+func (s *ComponentParamChecker) Check(currentComponent string, isComp bool) error {
 	/*
 		1. 如果没有用到Fs，不能用Fs相关系统参数，以及inputAtf，outputAtf机制
 		2. 先检查参数名是否有重复（parameter，artifact）
@@ -134,10 +134,16 @@ func (s *ComponentParamChecker) Check(currentComponent string, isOuterComp bool)
 		- parameters 字段中变量可引用系统参数、及上游节点parameter
 		- input artifacts 只能引用上游 outputArtifact
 		- output artifact不会引用任何参数，值由平台自动生成
-		- env 支持平台内置参数替换，上游step的parameter依赖替换，当前step的parameter替换
-		- command 支持平台内置参数替换，上游step的parameter依赖替换，当前step的parameter替换，当前step内input artifact、当前step内output artifact替换
+		- env 支持平台内置参数替换，当前step的parameter替换
+		- command 支持平台内置参数替换，当前step的parameter替换，当前step内input artifact、当前step内output artifact替换
 		4. 引用上游参数时，必须保证上游节点不在disabled列表中。
 	*/
+	isOuterComp := false
+	if isComp && !strings.Contains(currentComponent, ".") {
+		// 外层Component的校验逻辑特殊，所以这里判断当前Component是不是外层Component（template）
+		isOuterComp = true
+	}
+
 	err := s.checkDuplication(currentComponent)
 	if err != nil {
 		return err
@@ -154,9 +160,10 @@ func (s *ComponentParamChecker) Check(currentComponent string, isOuterComp bool)
 	}
 
 	// 1. parameter 校验
-	// parameter不需要将dict类型的参数默认值提取出来，因为会在StepParamResolver中做了
+	// 这里的dict参数会将默认值提取出来，替换dict参数
 	// 另外命令行参数替换默认值，会在workflow.go中完成
 	for paramName, paramVal := range component.GetParameters() {
+		// 有input artifact就必须有output artifact，在output那里检查是否有使用Fs即可，这里无需检查
 		if err = s.checkName(currentComponent, FieldParameters, paramName); err != nil {
 			return err
 		}
@@ -251,7 +258,7 @@ func (s *ComponentParamChecker) checkReference(comp schema.Component) error {
 			if len(step.Artifacts.Output) > 0 || len(step.Command) > 0 || len(step.Condition) > 0 ||
 				len(step.DockerEnv) > 0 || len(step.Env) > 0 || step.LoopArgument != nil ||
 				len(step.Cache.FsScope) > 0 || len(step.Cache.MaxExpiredTime) > 0 || step.Cache.Enable ||
-				len(step.FsMount) > 0 {
+				len(step.ExtraFS) > 0 {
 				return fmt.Errorf("reference step can only have deps, parameters, input artifacts, reference")
 			}
 
@@ -269,7 +276,6 @@ func (s *ComponentParamChecker) checkReference(comp schema.Component) error {
 				// 如果对应的被引用节点的参数为dict形式，则Reference节点的参数类型需要符合dict中Type的要求
 				switch referedParam := referedParam.(type) {
 				case map[string]interface{}:
-					logger.Logger().Infof("debug: dict param check in")
 					refDictParam := DictParam{}
 					if err := refDictParam.From(referedParam); err != nil {
 						return fmt.Errorf("invalid dict parameter[%v]", referedParam)
@@ -278,7 +284,7 @@ func (s *ComponentParamChecker) checkReference(comp schema.Component) error {
 						return fmt.Errorf("parameters in step with reference check dict param in refered param failed, error: %s", err.Error())
 					}
 				default:
-					logger.Logger().Infof("debug: dict param check type is : %s, name is : %s", reflect.TypeOf(referedParam), paramName)
+					logger.Logger().Infof("dict param check type is : %s, name is : %s, value is : %v", reflect.TypeOf(referedParam), paramName, referedParam)
 				}
 			}
 
@@ -319,6 +325,11 @@ func (s *ComponentParamChecker) solveParamValue(compName string, paramName strin
 	// 参数值检查
 	switch param := param.(type) {
 	case float32, float64, int, int64:
+		return param, nil
+	case []interface{}:
+		if err := CheckListParam(param); err != nil {
+			return nil, fmt.Errorf("component [%s] check list param failed: %s", compName, err.Error())
+		}
 		return param, nil
 	case string:
 		if err := s.resolveRefParam(compName, param, fieldType); err != nil {
@@ -400,20 +411,25 @@ func ParseParamName(paramName string) []string {
 	return paramStrList
 }
 
-func (s *ComponentParamChecker) refParamExist(currentCompName, refCompName, refParamName, fieldType string) error {
+func (s *ComponentParamChecker) refParamExist(currentCompAbsName, refCompName, refParamName, fieldType string) error {
 	/*
 		env, command只能引用当前节点的param, input/output artifacts
 		param 只做上游step的 param 依赖替换
 		input artifact 只做上游step的output artifact 依赖替换
 		PF_PARENT 为引用父节点的
 	*/
+
+	// 针对PF_PARENT单独校验
 	if refCompName == PF_PARENT {
-		if len(strings.Split(currentCompName, ".")) < 2 {
+		if len(strings.Split(currentCompAbsName, ".")) < 2 {
 			return fmt.Errorf("PF_PARENT should used by a child component")
 		}
-		return nil
+		if fieldType != FieldInputArtifacts && fieldType != FieldParameters {
+			return fmt.Errorf("PF_PARENT can only used in parameters or input artifacts")
+		}
 	}
-	curComponent := s.Components[currentCompName]
+
+	curComponent := s.Components[currentCompAbsName]
 	// s.DisabledSteps和s.Components保存的是完整节点名称，即从跟节点到当前节点的完整路径，如A.BB.CCC
 	// 因此需要结合currentCompName（完整节点名称），对refCompName（相对节点名称）进行拓展
 	var absoluteRefCompName string
@@ -422,23 +438,24 @@ func (s *ComponentParamChecker) refParamExist(currentCompName, refCompName, refP
 		if curComponent.GetType() != "dag" {
 			return fmt.Errorf("only dag can use output aritfacts of subComponents")
 		}
-		absoluteRefCompName = currentCompName + "." + refCompName
+		absoluteRefCompName = currentCompAbsName + "." + refCompName
 	default:
-		if !StringsContain(curComponent.GetDeps(), refCompName) {
-			return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: component[%s] not in deps", refCompName, refParamName, currentCompName, refCompName)
-		}
-
-		refCompNameList := strings.Split(currentCompName, ".")
-		if len(refCompNameList) > 1 {
-			absoluteRefCompName = strings.Join(refCompNameList[:len(refCompNameList)-1], ".") + "." + refCompName
+		refCompNameList := strings.Split(currentCompAbsName, ".")
+		if refCompName == PF_PARENT {
+			absoluteRefCompName = strings.Join(refCompNameList[:len(refCompNameList)-1], ".")
 		} else {
-			absoluteRefCompName = refCompName
+			if !StringsContain(curComponent.GetDeps(), refCompName) {
+				return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: component[%s] not in deps",
+					refCompName, refParamName, currentCompAbsName, refCompName)
+			}
+			absoluteRefCompName = GetSiblingAbsoluteName(currentCompAbsName, refCompName)
 		}
 	}
 
 	refComponent, ok := s.Components[absoluteRefCompName]
 	if !ok {
-		return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: component[%s] not exist", refCompName, refParamName, currentCompName, absoluteRefCompName)
+		return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: component[%s] not exist",
+			refCompName, refParamName, currentCompAbsName, absoluteRefCompName)
 	}
 
 	// 如果refComponent是reference节点（设置了reference.component）的话，则需要找到对应的Component再进行下面的检查
@@ -465,17 +482,35 @@ func (s *ComponentParamChecker) refParamExist(currentCompName, refCompName, refP
 		// 这里的Output Artfacts仅适用于Dag
 		if refComponent.GetCondition() != "" {
 			return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: component[%s] has condition so its param and output artifacts can't be refered",
-				refCompName, refParamName, currentCompName, refCompName)
+				refCompName, refParamName, currentCompAbsName, refCompName)
 		}
-		if _, ok := refComponent.GetArtifacts().Output[refParamName]; !ok {
-			return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: output artifact[%s] not exist", refCompName, refParamName, currentCompName, refParamName)
+		if refCompName == PF_PARENT {
+			// 如果input artifact使用了PF_PARENT
+			if _, ok := refComponent.GetArtifacts().Input[refParamName]; !ok {
+				return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: input artifact[%s] not exist",
+					refCompName, refParamName, currentCompAbsName, refParamName)
+			}
+		} else {
+			if _, ok := refComponent.GetArtifacts().Output[refParamName]; !ok {
+				return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: output artifact[%s] not exist",
+					refCompName, refParamName, currentCompAbsName, refParamName)
+			}
 		}
 	case FieldParameters:
-		if _, ok := refComponent.GetParameters()[refParamName]; !ok {
-			return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: parameter[%s] not exist", refCompName, refParamName, currentCompName, refParamName)
+		if refParamName == PF_LOOP_ARGUMENT {
+			if refComponent.GetLoopArgument() == nil {
+				return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: loop_argument not exist",
+					refCompName, refParamName, currentCompAbsName)
+			}
+		} else {
+			if _, ok := refComponent.GetParameters()[refParamName]; !ok {
+				return fmt.Errorf("invalid reference param {{ %s.%s }} in component[%s]: parameter[%s] not exist",
+					refCompName, refParamName, currentCompAbsName, refParamName)
+			}
 		}
 	default:
-		return fmt.Errorf("component [%s] refer [%s.%s] invalid, only parameters can use upstream parameters and only input artifacts can use upstream output artifacts", currentCompName, refCompName, refParamName)
+		return fmt.Errorf("component [%s] refer [%s.%s] invalid, only parameters can use upstream parameters and only input artifacts can use upstream output artifacts",
+			currentCompAbsName, refCompName, refParamName)
 	}
 
 	return nil

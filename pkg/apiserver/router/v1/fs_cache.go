@@ -23,9 +23,9 @@ import (
 	"path/filepath"
 
 	"github.com/go-chi/chi"
-	"github.com/go-playground/validator/v10"
 	log "github.com/sirupsen/logrus"
 	"gorm.io/gorm"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/common"
 	api "github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/controller/fs"
@@ -64,7 +64,7 @@ func (pr *PFSRouter) createFSCacheConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// validate request
-	if err := validateCacheConfigCreate(&ctx, &createRequest.UpdateFileSystemCacheRequest); err != nil {
+	if err := validateCacheConfigCreate(&ctx, &createRequest); err != nil {
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
 	}
@@ -77,147 +77,47 @@ func (pr *PFSRouter) createFSCacheConfig(w http.ResponseWriter, r *http.Request)
 	common.RenderStatus(w, http.StatusCreated)
 }
 
-func validateCacheConfigCreate(ctx *logger.RequestContext, req *api.UpdateFileSystemCacheRequest) error {
-	// meta driver
-	if req.MetaDriver == "" {
-		req.MetaDriver = schema.FsMetaDefault
-	}
-	if !schema.IsValidFsMetaDriver(req.MetaDriver) {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs meta driver[%s] not valid", req.MetaDriver)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
+func validationReturnError(ctx *logger.RequestContext, err error) error {
+	ctx.ErrorCode = common.InvalidArguments
+	ctx.Logging().Errorf(err.Error())
+	return err
+}
+
+func validateCacheConfigCreate(ctx *logger.RequestContext, req *api.CreateFileSystemCacheRequest) error {
+	if req.MetaDriver != "" && !schema.IsValidFsMetaDriver(req.MetaDriver) {
+		return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: meta driver[%s] not valid",
+			req.FsID, req.MetaDriver))
 	}
 	// BlockSize
 	if req.BlockSize < 0 {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs data cache blockSize[%d] should not be negative", req.BlockSize)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
+		return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: data cache blockSize[%d] should not be negative",
+			req.FsID, req.BlockSize))
 	}
 	// cacheDir must be absolute path or ""
 	if req.CacheDir != "" && !filepath.IsAbs(req.CacheDir) {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs cacheDir[%s] should be empty or an absolute path", req.CacheDir)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
+		return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: cacheDir[%s] should be empty or an absolute path",
+			req.FsID, req.CacheDir))
 	}
 	// must assign cacheDir when cache in use
-	if (req.BlockSize > 0 || req.MetaDriver == schema.FsMetaLevelDB || req.MetaDriver == schema.FsMetaNutsDB) &&
-		req.CacheDir == "" {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs cacheDir[%s] should be an absolute path when cache in use", req.CacheDir)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
+	if req.CacheDir == "" && req.MetaDriver == schema.FsMetaLevelDB {
+		return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: cacheDir[%s] should be an absolute path when cache in use",
+			req.FsID, req.CacheDir))
 	}
-	return nil
-}
-
-// updateFSCacheConfig
-// @Summary 更新FsID的缓存配置
-// @Description  更新FsID的缓存配置
-// @Id updateFSCacheConfig
-// @tags FSCacheConfig
-// @Accept  json
-// @Produce json
-// @Param fsName path string true "存储名称"
-// @Param username query string false "用户名"
-// @Param request body fs.UpdateFileSystemCacheRequest true "request body"
-// @Success 200 {object} models.FSCacheConfig "缓存配置结构体"
-// @Failure 400 {object} common.ErrorResponse "400"
-// @Failure 500 {object} common.ErrorResponse "500"
-// @Router /fsCache/{fsName} [PUT]
-func (pr *PFSRouter) updateFSCacheConfig(w http.ResponseWriter, r *http.Request) {
-	fsName := chi.URLParam(r, util.QueryFsName)
-	username := r.URL.Query().Get(util.QueryKeyUserName)
-	ctx := common.GetRequestContext(r)
-
-	var req api.UpdateFileSystemCacheRequest
-	if err := common.BindJSON(r, &req); err != nil {
-		ctx.Logging().Errorf("UpdateFSCacheConfig[%s] bindjson failed. err:%s", fsName, err.Error())
-		common.RenderErrWithMessage(w, ctx.RequestID, common.MalformedJSON, err.Error())
-		return
-	}
-	realUserName := getRealUserName(&ctx, username)
-	req.FsID = common.ID(realUserName, fsName)
-
-	// validate can be modified
-	if err := fsExistsForModify(&ctx, req.FsID); err != nil {
-		ctx.Logging().Errorf("checkCanModifyFs[%s] err: %v", req.FsID, err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
-
-	// validate fs_cache_config existence
-	prev, err := api.GetFileSystemCacheConfig(&ctx, req.FsID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			ctx.ErrorCode = common.RecordNotFound
-		} else {
-			ctx.ErrorCode = common.InternalError
+	// check resource
+	rcs := req.Resource
+	if rcs.CpuLimit != "" {
+		if _, err := resource.ParseQuantity(rcs.CpuLimit); err != nil {
+			return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: invalid resource cpuLimit [%s]",
+				req.FsID, rcs.CpuLimit))
 		}
-		logger.LoggerForRequest(&ctx).Errorf("validate fs_cache_config[%s] failed. error:%v", req.FsID, err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
 	}
-
-	// validate request
-	if err := validateCacheConfigUpdate(&ctx, req, prev); err != nil {
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
-	// update DB
-	if err := api.UpdateFileSystemCacheConfig(&ctx, req); err != nil {
-		ctx.Logging().Errorf("updateFSCacheConfig[%s] err:%v", req.FsID, err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
-	common.RenderStatus(w, http.StatusOK)
-}
-
-func validateCacheConfigUpdate(ctx *logger.RequestContext, req api.UpdateFileSystemCacheRequest, prev api.FileSystemCacheResponse) error {
-	// meta driver
-	if req.MetaDriver != "" && !schema.IsValidFsMetaDriver(req.MetaDriver) {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs meta driver[%s] not valid", req.MetaDriver)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
-	}
-	// BlockSize
-	if req.BlockSize < 0 {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs data cache blockSize[%d] should not be negative", req.BlockSize)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
-	}
-	// cacheDir must be absolute path or ""
-	if req.CacheDir != "" && !filepath.IsAbs(req.CacheDir) {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs cacheDir[%s] should be empty or an absolute path", req.CacheDir)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
-	}
-	// must have cacheDir when cache in use
-	if needCacheDir(req, prev) && req.CacheDir == "" && prev.CacheDir == "" {
-		ctx.ErrorCode = common.InvalidArguments
-		err := fmt.Errorf("fs cacheDir[%s] should be an absolute path when using meta/data cache", req.CacheDir)
-		ctx.Logging().Errorf("validate fs cache config fsID[%s] err: %v", req.FsID, err)
-		return err
+	if rcs.MemoryLimit != "" {
+		if _, err := resource.ParseQuantity(rcs.MemoryLimit); err != nil {
+			return validationReturnError(ctx, fmt.Errorf("fs[%s] cache config: invalid resource memoryLimit [%s]",
+				req.FsID, rcs.MemoryLimit))
+		}
 	}
 	return nil
-}
-
-func needCacheDir(req api.UpdateFileSystemCacheRequest, prev api.FileSystemCacheResponse) bool {
-	if req.MetaDriver == schema.FsMetaLevelDB || req.MetaDriver == schema.FsMetaNutsDB {
-		return true
-	}
-	if req.BlockSize > 0 {
-		return true
-	}
-	if prev.MetaDriver == schema.FsMetaLevelDB || prev.MetaDriver == schema.FsMetaNutsDB || prev.BlockSize > 0 {
-		return true
-	}
-	return false
 }
 
 // getFSCacheConfig
@@ -301,62 +201,4 @@ func (pr *PFSRouter) deleteFSCacheConfig(w http.ResponseWriter, r *http.Request)
 	}
 
 	common.RenderStatus(w, http.StatusOK)
-}
-
-// FSCacheReport
-// @Summary 上报FsID的缓存信息
-// @Description  上报FsID的缓存信息
-// @Id FSCacheReport
-// @tags FSCacheConfig
-// @Accept  json
-// @Produce json
-// @Param fsName path string true "存储名称"
-// @Param username query string false "用户名"
-// @Param request body fs.CacheReportRequest true "request body"
-// @Success 200 {object}
-// @Failure 400 {object} common.ErrorResponse "400"
-// @Failure 500 {object} common.ErrorResponse "500"
-// @Router /fsCache/report [POST]
-func (pr *PFSRouter) fsCacheReport(w http.ResponseWriter, r *http.Request) {
-	ctx := common.GetRequestContext(r)
-	var request api.CacheReportRequest
-	err := common.BindJSON(r, &request)
-	if err != nil {
-		ctx.Logging().Errorf("FSCachReport bindjson failed. err:%s", err.Error())
-		common.RenderErr(w, ctx.RequestID, common.MalformedJSON)
-		return
-	}
-	if request.Username == "" {
-		request.Username = ctx.UserName
-	}
-
-	err = validateFsCacheReport(&ctx, &request)
-	if err != nil {
-		ctx.Logging().Errorf("validateFsCacheReport request[%v] failed: [%v]", request, err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
-
-	ctx.Logging().Debugf("report cache with req[%v]", request)
-
-	err = api.ReportCache(&ctx, request)
-	if err != nil {
-		ctx.Logging().Errorf("report cache with service error[%v]", err)
-		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
-		return
-	}
-
-	common.RenderStatus(w, http.StatusOK)
-}
-
-func validateFsCacheReport(ctx *logger.RequestContext, req *api.CacheReportRequest) error {
-	validate := validator.New()
-	err := validate.Struct(req)
-	if err != nil {
-		for _, err = range err.(validator.ValidationErrors) {
-			ctx.ErrorCode = common.InappropriateJSON
-			return err
-		}
-	}
-	return nil
 }

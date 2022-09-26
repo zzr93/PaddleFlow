@@ -78,7 +78,7 @@ func (rr *RunRouter) createRun(w http.ResponseWriter, r *http.Request) {
 	// add trace logger
 	trace_logger.Key(requestId).Infof("creating run for request:%+v", createRunInfo)
 	// create run
-	response, err := pipeline.CreateRun(ctx, &createRunInfo)
+	response, err := pipeline.CreateRun(ctx, &createRunInfo, nil)
 	if err != nil {
 		errMsg := fmt.Sprintf(
 			"create run failed. createRunInfo:%v error:%s", createRunInfo, err.Error())
@@ -180,7 +180,11 @@ func (rr *RunRouter) listRun(w http.ResponseWriter, r *http.Request) {
 
 	userNames, fsNames := r.URL.Query().Get(util.QueryKeyUserFilter), r.URL.Query().Get(util.QueryKeyFsFilter)
 	runIDs, names := r.URL.Query().Get(util.QueryKeyRunFilter), r.URL.Query().Get(util.QueryKeyNameFilter)
+	status := r.URL.Query().Get(util.QueryKeyStatusFilter)
+
 	userFilter, fsFilter, runFilter, nameFilter := make([]string, 0), make([]string, 0), make([]string, 0), make([]string, 0)
+	statusFilter := make([]string, 0)
+
 	if userNames != "" {
 		userFilter = strings.Split(userNames, common.SeparatorComma)
 	}
@@ -193,10 +197,13 @@ func (rr *RunRouter) listRun(w http.ResponseWriter, r *http.Request) {
 	if names != "" {
 		nameFilter = strings.Split(names, common.SeparatorComma)
 	}
+	if status != "" {
+		statusFilter = strings.Split(status, common.SeparatorComma)
+	}
 	logger.LoggerForRequest(&ctx).Debugf(
 		"user[%s] ListRun marker:[%s] maxKeys:[%d] userFilter:%v fsFilter:%v runFilter:%v nameFilter:%v",
 		ctx.UserName, marker, maxKeys, userFilter, fsFilter, runFilter, nameFilter)
-	listRunResponse, err := pipeline.ListRun(&ctx, marker, maxKeys, userFilter, fsFilter, runFilter, nameFilter, nil, nil)
+	listRunResponse, err := pipeline.ListRun(&ctx, marker, maxKeys, userFilter, fsFilter, runFilter, nameFilter, statusFilter, nil)
 	if err != nil {
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
@@ -220,6 +227,10 @@ func (rr *RunRouter) getRunByID(w http.ResponseWriter, r *http.Request) {
 	ctx := common.GetRequestContext(r)
 	runID := chi.URLParam(r, util.ParamKeyRunID)
 	runInfo, err := pipeline.GetRunByID(ctx.Logging(), ctx.UserName, runID)
+
+	// 优化RuntimeView结构，使显示结果更友好
+	runInfo.Runtime = runInfo.RemoveOuterDagView(runInfo.Runtime)
+
 	if err != nil {
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
@@ -271,7 +282,7 @@ func (rr *RunRouter) updateRun(w http.ResponseWriter, r *http.Request) {
 			ctx.ErrorCode = common.InternalError
 		}
 	case util.QueryActionRetry:
-		err = pipeline.RetryRun(&ctx, runID)
+		runID, err = pipeline.RetryRun(&ctx, runID)
 	default:
 		ctx.ErrorCode = common.InvalidURI
 		err = fmt.Errorf("invalid action[%s] for UpdateRun", action)
@@ -282,7 +293,12 @@ func (rr *RunRouter) updateRun(w http.ResponseWriter, r *http.Request) {
 		common.RenderErrWithMessage(w, ctx.RequestID, ctx.ErrorCode, err.Error())
 		return
 	}
-	common.RenderStatus(w, http.StatusOK)
+	if action == util.QueryActionRetry {
+		rsp := pipeline.UpdateRunResponse{RunID: runID}
+		common.Render(w, http.StatusOK, rsp)
+	} else {
+		common.RenderStatus(w, http.StatusOK)
+	}
 }
 
 // deleteRun

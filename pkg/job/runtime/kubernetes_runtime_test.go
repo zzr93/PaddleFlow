@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,7 +36,6 @@ import (
 	fakedclient "k8s.io/client-go/kubernetes/fake"
 	restclient "k8s.io/client-go/rest"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/resources"
@@ -44,6 +44,7 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage/driver"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/trace_logger"
 )
 
 const (
@@ -83,7 +84,31 @@ func newFakeDynamicClient(server *httptest.Server) *k8s.DynamicClientOption {
 	}
 }
 
+// init trace logger
+func initTestTraceLogger() error {
+	tmpDir, err := os.MkdirTemp("", "")
+	if err != nil {
+		return err
+	}
+	conf := trace_logger.TraceLoggerConfig{
+		Dir:             tmpDir,
+		FilePrefix:      "trace_logger",
+		Level:           "debug",
+		MaxKeepDays:     2,
+		MaxFileNum:      10,
+		MaxFileSizeInMB: 1,
+		IsCompress:      false,
+		Timeout:         "2s",
+		MaxCacheSize:    2,
+	}
+
+	return trace_logger.InitTraceLoggerManager(conf)
+}
+
 func TestKubeRuntimeJob(t *testing.T) {
+	if err := initTestTraceLogger(); !assert.Equal(t, nil, err) {
+		return
+	}
 	var server = httptest.NewServer(k8s.DiscoveryHandlerFunc)
 	defer server.Close()
 	dynamicClient := newFakeDynamicClient(server)
@@ -99,7 +124,7 @@ func TestKubeRuntimeJob(t *testing.T) {
 		Namespace:         "default",
 		JobType:           schema.TypeVcJob,
 		JobMode:           schema.EnvJobModePod,
-		ExtensionTemplate: vcjobManifest,
+		ExtensionTemplate: []byte(vcjobManifest),
 		Conf: schema.Conf{
 			Env: map[string]string{
 				schema.EnvJobQueueName: "default",
@@ -115,7 +140,7 @@ func TestKubeRuntimeJob(t *testing.T) {
 	}
 	driver.InitMockDB()
 	config.GlobalServerConfig = &config.ServerConfig{}
-	err := models.CreateJob(&models.Job{
+	err := storage.Job.CreateJob(&model.Job{
 		ID: testJobID,
 		Config: &schema.Conf{
 			Env: map[string]string{
@@ -143,8 +168,8 @@ func TestKubeRuntimeVCQueue(t *testing.T) {
 		dynamicClientOpt: dynamicClient,
 	}
 
-	q := &models.Queue{
-		Model: models.Model{
+	q := &model.Queue{
+		Model: model.Model{
 			ID: "test_queue_id",
 		},
 		Name:      "test_queue_name",
@@ -177,8 +202,8 @@ func TestKubeRuntimeElasticQuota(t *testing.T) {
 		dynamicClientOpt: dynamicClient,
 	}
 
-	q := &models.Queue{
-		Model: models.Model{
+	q := &model.Queue{
+		Model: model.Model{
 			ID: "test_queue_id",
 		},
 		Name:      "test_queue_name",
@@ -212,6 +237,7 @@ func TestKubeRuntimePVAndPVC(t *testing.T) {
 	client := fakedclient.NewSimpleClientset()
 	kubeRuntime := &KubeRuntime{
 		clientset: client,
+		cluster:   &schema.Cluster{Name: "test-cluster", ID: "clustermock"},
 	}
 	driver.InitMockDB()
 
@@ -242,9 +268,9 @@ func TestKubeRuntimePVAndPVC(t *testing.T) {
 		},
 	}
 	config.GlobalServerConfig = &config.ServerConfig{
-		Fs: config.FsServerConf{
-			K8sServiceName: "paddleflow",
-			K8sServicePort: 8083,
+		ApiServer: config.ApiServerConfig{
+			Host: "paddleflow-server",
+			Port: 8999,
 		},
 	}
 

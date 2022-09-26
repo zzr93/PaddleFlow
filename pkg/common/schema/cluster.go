@@ -16,7 +16,9 @@ limitations under the License.
 
 package schema
 
-import "github.com/PaddlePaddle/PaddleFlow/pkg/common/resources"
+import (
+	"github.com/PaddlePaddle/PaddleFlow/pkg/common/resources"
+)
 
 const (
 	LocalType      = "Local"

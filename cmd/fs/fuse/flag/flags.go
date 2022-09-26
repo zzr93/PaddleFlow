@@ -105,15 +105,15 @@ func CacheFlags(fuseConf *fuse.FuseConfig) []cli.Flag {
 			Value: 20971520,
 			Usage: "block size",
 		},
-		&cli.IntFlag{
+		&cli.DurationFlag{
 			Name:        "attr-timeout",
-			Value:       1,
+			Value:       1 * time.Second,
 			Usage:       "attribute cache TTL",
 			Destination: &fuseConf.AttrTimeout,
 		},
-		&cli.IntFlag{
+		&cli.DurationFlag{
 			Name:        "entry-timeout",
-			Value:       1,
+			Value:       1 * time.Second,
 			Usage:       "entry cache TTL",
 			Destination: &fuseConf.EntryTimeout,
 		},
@@ -121,6 +121,11 @@ func CacheFlags(fuseConf *fuse.FuseConfig) []cli.Flag {
 			Name:  "data-read-ahead-size",
 			Value: 200 * 1024 * 1024,
 			Usage: "size of read-ahead data",
+		},
+		&cli.BoolFlag{
+			Name:  "clean-cache",
+			Value: false,
+			Usage: "clean cache dir after mount process ends",
 		},
 	}
 }

@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -45,6 +45,10 @@ const (
 	EnvDockerEnv = "dockerEnv"
 
 	FsPrefix = "fs-"
+
+	CompTypeComponents  = "components"
+	CompTypeEntryPoints = "entryPoints"
+	CompTypePostProcess = "postProcess"
 )
 
 func ID(userName, fsName string) string {
@@ -140,7 +144,7 @@ type WorkflowSourceStep struct {
 	DockerEnv    string                 `yaml:"docker_env"`
 	Cache        Cache                  `yaml:"cache"`
 	Reference    Reference              `yaml:"reference"`
-	FsMount      []FsMount              `yaml:"fs_mount"`
+	ExtraFS      []FsMount              `yaml:"extra_fs"`
 }
 
 func (s *WorkflowSourceStep) GetName() string {
@@ -272,7 +276,7 @@ func (s *WorkflowSourceStep) DeepCopy() Component {
 		env[name] = value
 	}
 
-	fsMount := append(s.FsMount, []FsMount{}...)
+	fsMount := append(s.ExtraFS, []FsMount{}...)
 
 	ns := &WorkflowSourceStep{
 		Name:         s.Name,
@@ -286,7 +290,7 @@ func (s *WorkflowSourceStep) DeepCopy() Component {
 		DockerEnv:    s.DockerEnv,
 		Cache:        s.Cache,
 		Reference:    s.Reference,
-		FsMount:      fsMount,
+		ExtraFS:      fsMount,
 	}
 
 	return ns
@@ -450,6 +454,11 @@ func (d *WorkflowSourceDag) DeepCopy() Component {
 	return nd
 }
 
+type RunOptions struct {
+	FSUsername string
+	StopForce  bool
+}
+
 type Reference struct {
 	Component string
 }
@@ -461,9 +470,9 @@ type Cache struct {
 }
 
 type FsScope struct {
-	FsName string `yaml:"fs_name"       json:"fsName"`
-	FsID   string `yaml:"-"             json:"fsID"`
-	Path   string `yaml:"path"          json:"path"`
+	Name string `yaml:"name"          json:"name"`
+	ID   string `yaml:"-"             json:"id"`
+	Path string `yaml:"path"          json:"path"`
 }
 
 type FailureOptions struct {
@@ -471,16 +480,16 @@ type FailureOptions struct {
 }
 
 type FsOptions struct {
-	GlobalFsName string    `yaml:"global_fs_name"    json:"globalFsName"`
-	FsMount      []FsMount `yaml:"fs_mount"     json:"fsMount"`
+	MainFS  FsMount   `yaml:"main_fs"      json:"mainFS"`
+	ExtraFS []FsMount `yaml:"extra_fs"     json:"extraFS,omitempty"`
 }
 
 type FsMount struct {
-	FsID      string `yaml:"-"             json:"fsID"`
-	FsName    string `yaml:"fs_name"       json:"fsName"`
+	ID        string `yaml:"-"             json:"id"`
+	Name      string `yaml:"name"          json:"name"`
 	MountPath string `yaml:"mount_path"    json:"mountPath"`
 	SubPath   string `yaml:"sub_path"      json:"subPath"`
-	Readonly  bool   `yaml:"readonly"      json:"readonly"`
+	ReadOnly  bool   `yaml:"read_only"     json:"readOnly"`
 }
 
 type WorkflowSource struct {
@@ -516,8 +525,8 @@ func (wfs *WorkflowSource) IsDisabled(componentName string) (bool, error) {
 	for k, v := range wfs.PostProcess {
 		postComponents[k] = v
 	}
-	_, _, ok1 := wfs.GetComponent(wfs.EntryPoints.EntryPoints, componentName)
-	_, _, ok2 := wfs.GetComponent(postComponents, componentName)
+	_, _, ok1 := wfs.GetCompsMapAndRelName(wfs.EntryPoints.EntryPoints, componentName)
+	_, _, ok2 := wfs.GetCompsMapAndRelName(postComponents, componentName)
 	if !ok1 && !ok2 {
 		return false, fmt.Errorf("check disabled for component[%s] failed, component not existed!", componentName)
 	}
@@ -530,13 +539,13 @@ func (wfs *WorkflowSource) IsDisabled(componentName string) (bool, error) {
 	return false, nil
 }
 
-// 递归的检查absoluteName对应的Component是否存在
-func (wfs *WorkflowSource) GetComponent(components map[string]Component, absoluteName string) (map[string]Component, string, bool) {
+// 递归的检查Absolute Name对应的Component是否存在，并返回该Comp的所有同级别节点，和它的Relative Name
+func (wfs *WorkflowSource) GetCompsMapAndRelName(components map[string]Component, absoluteName string) (map[string]Component, string, bool) {
 	nameList := strings.SplitN(absoluteName, ".", 2)
 	if len(nameList) > 1 {
 		if component, ok := components[nameList[0]]; ok {
 			if dag, ok := component.(*WorkflowSourceDag); ok {
-				return wfs.GetComponent(dag.EntryPoints, nameList[1])
+				return wfs.GetCompsMapAndRelName(dag.EntryPoints, nameList[1])
 			} else if step, ok := component.(*WorkflowSourceStep); ok {
 				// 如果为step，检查是否有引用Source.Components中的节点
 				referComp := step.Reference.Component
@@ -561,7 +570,7 @@ func (wfs *WorkflowSource) componentsHasStep(referComp string, subNames string) 
 		if referedComponent, ok := wfs.Components[referComp]; ok {
 			if dag, ok := referedComponent.(*WorkflowSourceDag); ok {
 				// 检查Source.Components中的节点，如果它是一个dag，那就继续向下遍历子节点
-				return wfs.GetComponent(dag.EntryPoints, subNames)
+				return wfs.GetCompsMapAndRelName(dag.EntryPoints, subNames)
 			} else if step, ok := referedComponent.(*WorkflowSourceStep); ok {
 				// 如果是step，那就看是否继续ref了其他component
 				referComp = step.Reference.Component
@@ -621,7 +630,7 @@ func GetWorkflowSourceByMap(yamlMap map[string]interface{}) (WorkflowSource, err
 	if !ok {
 		return WorkflowSource{}, fmt.Errorf("get entry_points map failed")
 	}
-	if err := wfs.ProcessRuntimeComponents(wfs.EntryPoints.EntryPoints, yamlMap, entryPointsMap); err != nil {
+	if err := wfs.ProcessRuntimeComponents(wfs.EntryPoints.EntryPoints, CompTypeEntryPoints, yamlMap, entryPointsMap); err != nil {
 		return WorkflowSource{}, err
 	}
 
@@ -631,14 +640,14 @@ func GetWorkflowSourceByMap(yamlMap map[string]interface{}) (WorkflowSource, err
 	}
 	postProcessMap, ok := yamlMap["post_process"].(map[string]interface{})
 	if ok {
-		if err := wfs.ProcessRuntimeComponents(postComponentsMap, yamlMap, postProcessMap); err != nil {
+		if err := wfs.ProcessRuntimeComponents(postComponentsMap, CompTypePostProcess, yamlMap, postProcessMap); err != nil {
 			return WorkflowSource{}, err
 		}
 	}
 
 	componentMap, ok := yamlMap["components"].(map[string]interface{})
 	if ok {
-		if err := wfs.ProcessRuntimeComponents(wfs.Components, yamlMap, componentMap); err != nil {
+		if err := wfs.ProcessRuntimeComponents(wfs.Components, CompTypeComponents, yamlMap, componentMap); err != nil {
 			return WorkflowSource{}, err
 		}
 	}
@@ -646,7 +655,8 @@ func GetWorkflowSourceByMap(yamlMap map[string]interface{}) (WorkflowSource, err
 }
 
 // 对Step的DockerEnv、Cache进行全局替换
-func (wfs *WorkflowSource) ProcessRuntimeComponents(components map[string]Component, yamlMap map[string]interface{}, componentsMap map[string]interface{}) error {
+func (wfs *WorkflowSource) ProcessRuntimeComponents(components map[string]Component, componentType string,
+	yamlMap map[string]interface{}, componentsMap map[string]interface{}) error {
 	for name, component := range components {
 		if dag, ok := component.(*WorkflowSourceDag); ok {
 			subComponent, ok, err := unstructured.NestedFieldCopy(componentsMap, name, "entry_points")
@@ -657,7 +667,7 @@ func (wfs *WorkflowSource) ProcessRuntimeComponents(components map[string]Compon
 			if !ok {
 				return fmt.Errorf("get subComponentMap failed")
 			}
-			if err := wfs.ProcessRuntimeComponents(dag.EntryPoints, yamlMap, subComponentMap); err != nil {
+			if err := wfs.ProcessRuntimeComponents(dag.EntryPoints, componentType, yamlMap, subComponentMap); err != nil {
 				return err
 			}
 		} else if step, ok := component.(*WorkflowSourceStep); ok {
@@ -686,27 +696,30 @@ func (wfs *WorkflowSource) ProcessRuntimeComponents(components map[string]Compon
 					}
 				}
 
-				// 获取全局Cache
-				globalCache, ok, err := unstructured.NestedFieldCopy(yamlMap, "cache")
-				if err != nil {
-					return fmt.Errorf("check globalCache failed")
-				}
-				globalCacheMap := map[string]interface{}{}
-				if ok {
-					globalCacheMap, ok = globalCache.(map[string]interface{})
-					if !ok {
-						return fmt.Errorf("get globalCacheMap failed")
+				// postProcess中不允许设置Cache
+				if componentType != CompTypePostProcess {
+					// 获取全局Cache
+					globalCache, ok, err := unstructured.NestedFieldCopy(yamlMap, "cache")
+					if err != nil {
+						return fmt.Errorf("check globalCache failed")
 					}
-				}
+					globalCacheMap := map[string]interface{}{}
+					if ok {
+						globalCacheMap, ok = globalCache.(map[string]interface{})
+						if !ok {
+							return fmt.Errorf("get globalCacheMap failed")
+						}
+					}
 
-				// Cache替换处理
-				if err := ProcessStepCacheByMap(&step.Cache, globalCacheMap, componentCacheMap); err != nil {
-					return err
+					// Cache替换处理
+					if err := ProcessStepCacheByMap(&step.Cache, globalCacheMap, componentCacheMap); err != nil {
+						return err
+					}
 				}
 
 				// 合并全局 fs_mount 和节点 fs_mount
 				// 获取全局 fs_mount
-				globalFsMount, ok, err := unstructured.NestedFieldCopy(yamlMap, "fs_options", "fs_mount")
+				globalFsMount, ok, err := unstructured.NestedFieldCopy(yamlMap, "fs_options", "extra_fs")
 				if err != nil {
 					return fmt.Errorf("check globalFsMount failed")
 				}
@@ -719,7 +732,7 @@ func (wfs *WorkflowSource) ProcessRuntimeComponents(components map[string]Compon
 				}
 
 				// fs_mount 合并
-				if err := ProcessStepFsMount(&step.FsMount, globalFsMountList); err != nil {
+				if err := ProcessStepFsMount(&step.ExtraFS, globalFsMountList); err != nil {
 					return err
 				}
 			}
@@ -825,71 +838,40 @@ func (wfs *WorkflowSource) TransToRunYamlRaw() (runYamlRaw string, err error) {
 	return
 }
 
-// 给所有Step的fsMount和fsScope的fsID赋值
-func (wfs *WorkflowSource) ProcessFsAndGetAllIDs(userName string, globalFsName string) ([]string, error) {
-	// 用map记录所有需要返回的ID，去重
-	fsIDMap := map[string]int{}
+func (wfs *WorkflowSource) GetFsMounts() ([]FsMount, error) {
+	fsMountList := []FsMount{}
 
-	logger.Logger().Infof("debug: begin process FsID")
-	if err := wfs.processFsByUserName(wfs.EntryPoints.EntryPoints, userName, fsIDMap, globalFsName); err != nil {
-		return []string{}, err
+	if wfs.FsOptions.MainFS.Name != "" {
+		fsMountList = append(fsMountList, wfs.FsOptions.MainFS)
 	}
 
-	if err := wfs.processFsByUserName(wfs.Components, userName, fsIDMap, globalFsName); err != nil {
-		return []string{}, err
+	if err := wfs.getFsMountsFromComps(wfs.EntryPoints.EntryPoints, &fsMountList); err != nil {
+		return []FsMount{}, err
+	}
+
+	if err := wfs.getFsMountsFromComps(wfs.Components, &fsMountList); err != nil {
+		return []FsMount{}, err
 	}
 
 	postMap := map[string]Component{}
 	for k, v := range wfs.PostProcess {
 		postMap[k] = v
 	}
-	if err := wfs.processFsByUserName(postMap, userName, fsIDMap, globalFsName); err != nil {
-		return []string{}, err
+	if err := wfs.getFsMountsFromComps(postMap, &fsMountList); err != nil {
+		return []FsMount{}, err
 	}
 
-	resFsIDList := []string{}
-	for id := range fsIDMap {
-		resFsIDList = append(resFsIDList, id)
-	}
-
-	return resFsIDList, nil
+	return fsMountList, nil
 }
 
-func (wfs *WorkflowSource) processFsByUserName(compMap map[string]Component, userName string, fsIDMap map[string]int, globalFsName string) error {
+func (wfs *WorkflowSource) getFsMountsFromComps(compMap map[string]Component, mountList *[]FsMount) error {
 	for _, comp := range compMap {
 		if dag, ok := comp.(*WorkflowSourceDag); ok {
-			if err := wfs.processFsByUserName(dag.EntryPoints, userName, fsIDMap, globalFsName); err != nil {
+			if err := wfs.getFsMountsFromComps(dag.EntryPoints, mountList); err != nil {
 				return err
 			}
 		} else if step, ok := comp.(*WorkflowSourceStep); ok {
-			// fsNameSet用来检查FsScope中的FsName是否都在FsMount中，或者是global_fs_name
-			fsNameSet := map[string]int{globalFsName: 1}
-			fsNameSet[wfs.FsOptions.GlobalFsName] = 1
-
-			for i, mount := range step.FsMount {
-				if mount.FsName == "" {
-					return fmt.Errorf("[fs_name] in fs_mount must be set")
-				}
-				mount.FsID = ID(userName, mount.FsName)
-
-				fsNameSet[mount.FsName] = 1
-				fsIDMap[mount.FsID] = 1
-				step.FsMount[i] = mount
-				logger.Logger().Infof("debug: after process,  FsID is %s", mount.FsID)
-			}
-			logger.Logger().Infof("debug: after process,  step fsMount is %v", step.FsMount)
-			for i, scope := range step.Cache.FsScope {
-				if scope.FsName == "" {
-					return fmt.Errorf("[fs_name] in fs_scope must be set")
-				}
-				scope.FsID = ID(userName, scope.FsName)
-
-				// 检查FsScope中的FsName是否都在FsMount中
-				if _, ok := fsNameSet[scope.FsName]; !ok {
-					return fmt.Errorf("fs_name [%s] in fs_scope must also be in fs_mount", scope.FsName)
-				}
-				step.Cache.FsScope[i] = scope
-			}
+			*mountList = append(*mountList, step.ExtraFS...)
 		} else {
 			return fmt.Errorf("component not dag or step")
 		}

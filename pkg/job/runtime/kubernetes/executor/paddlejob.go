@@ -23,7 +23,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/errors"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
@@ -33,16 +32,38 @@ import (
 
 type PaddleJob struct {
 	KubeJob
-	JobModeParams
 }
 
-func (pj *PaddleJob) validateJob() error {
+func (pj *PaddleJob) validateJob(pdj *paddlev1.PaddleJob) error {
 	if err := pj.KubeJob.validateJob(); err != nil {
 		return err
 	}
 	if len(pj.JobMode) == 0 && !pj.IsCustomYaml {
 		// patch default value
 		pj.JobMode = schema.EnvJobModeCollective
+	}
+	if pj.IsCustomYaml {
+		if err := pj.validateCustomYaml(pdj); err != nil {
+			log.Errorf("validate custom yaml failed, err %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (pj *PaddleJob) validateCustomYaml(pdj *paddlev1.PaddleJob) error {
+	log.Infof("validate custom yaml, pj: %v, pdj from yaml: %v", pj, pdj)
+	resourceSpecs := []*paddlev1.ResourceSpec{pdj.Spec.PS, pdj.Spec.Worker}
+	for _, resourceSpec := range resourceSpecs {
+		if resourceSpec == nil {
+			continue
+		}
+		if err := validateTemplateResources(&resourceSpec.Template.Spec); err != nil {
+			err = fmt.Errorf("validate resource in extensionTemplate.Worker failed, err %v", err)
+			log.Errorf("%v", err)
+			return err
+		}
 	}
 
 	return nil
@@ -54,12 +75,8 @@ func (pj *PaddleJob) CreateJob() (string, error) {
 		log.Errorf("create job[%s] failed, err %v", pj.ID, err)
 		return "", err
 	}
-	if err := pj.validateJob(); err != nil {
+	if err := pj.validateJob(pdj); err != nil {
 		log.Errorf("validate [%s]type job[%s] failed, err %v", pj.JobType, pj.ID, err)
-		return "", err
-	}
-	if err := pj.validateJob(); err != nil {
-		log.Errorf("validate %s job failed, err %v", pj.JobType, err)
 		return "", err
 	}
 
@@ -135,20 +152,6 @@ func (pj *PaddleJob) patchPaddleJobSpec(pdjSpec *paddlev1.PaddleJobSpec) error {
 	return nil
 }
 
-func (pj *PaddleJob) StopJobByID(jobID string) error {
-	job, err := models.GetJobByID(jobID)
-	if err != nil {
-		return err
-	}
-	namespace := job.Config.GetNamespace()
-
-	if err = Delete(namespace, job.ID, k8s.PaddleJobGVK, pj.DynamicClientOption); err != nil {
-		log.Errorf("stop paddleJob %s in namespace %s failed, err %v", job.ID, namespace, err)
-		return err
-	}
-	return nil
-}
-
 // patchPdjPsSpec fill paddleJob spec in ps mode
 func (pj *PaddleJob) patchPdjPsSpec(pdjSpec *paddlev1.PaddleJobSpec) error {
 	// ps and worker
@@ -211,7 +214,7 @@ func (pj *PaddleJob) patchPdjCollectiveSpec(pdjSpec *paddlev1.PaddleJobSpec) err
 }
 
 // patchPdjTask patches info into task of paddleJob
-func (pj *PaddleJob) patchPdjTask(resourceSpec *paddlev1.ResourceSpec, task models.Member) error {
+func (pj *PaddleJob) patchPdjTask(resourceSpec *paddlev1.ResourceSpec, task schema.Member) error {
 	log.Infof("patchPdjTask, resourceSpec=%#v, task=%#v", resourceSpec, task)
 	if !pj.IsCustomYaml && task.Replicas > 0 {
 		resourceSpec.Replicas = task.Replicas
@@ -233,7 +236,10 @@ func (pj *PaddleJob) patchPdjTask(resourceSpec *paddlev1.ResourceSpec, task mode
 	if len(resourceSpec.Template.Spec.Containers) != 1 {
 		resourceSpec.Template.Spec.Containers = []v1.Container{{}}
 	}
-	pj.fillContainerInTasks(&resourceSpec.Template.Spec.Containers[0], task)
+	if err := pj.fillContainerInTasks(&resourceSpec.Template.Spec.Containers[0], task); err != nil {
+		log.Errorf("fill container in task failed, err=[%v]", err)
+		return err
+	}
 	// append into container.VolumeMounts
 	taskFs := task.Conf.GetAllFileSystem()
 	resourceSpec.Template.Spec.Volumes = appendVolumesIfAbsent(resourceSpec.Template.Spec.Volumes, generateVolumes(taskFs))

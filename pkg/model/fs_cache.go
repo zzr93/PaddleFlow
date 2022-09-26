@@ -40,18 +40,25 @@ type FSCache struct {
 	DeletedAt   gorm.DeletedAt `json:"-"`
 }
 
+type CacheStats struct {
+	FsID     string `json:"fsID"`
+	CacheDir string `json:"cacheDir"`
+	NodeName string `json:"nodename"`
+	UsedSize int    `json:"usedSize"`
+}
+
 func (c *FSCache) TableName() string {
 	return FsCacheTableName
 }
 
 func (c *FSCache) BeforeSave(*gorm.DB) error {
 	if c.CacheID == "" {
-		c.CacheID = CacheID(c.ClusterID, c.NodeName, c.CacheDir)
+		c.CacheID = CacheID(c.ClusterID, c.NodeName, c.CacheDir, c.FsID)
 	}
 	return nil
 }
 
-func CacheID(clusterID, nodeName, CacheDir string) string {
-	hash := md5.Sum([]byte(clusterID + nodeName + CacheDir))
+func CacheID(clusterID, nodeName, CacheDir, fsID string) string {
+	hash := md5.Sum([]byte(clusterID + nodeName + CacheDir + fsID))
 	return hex.EncodeToString(hash[:])
 }

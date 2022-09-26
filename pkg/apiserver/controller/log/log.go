@@ -18,6 +18,8 @@ package log
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -26,6 +28,8 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/trace_logger"
 )
 
@@ -71,6 +75,52 @@ func GetRunLog(ctx *logger.RequestContext, runID string, request GetRunLogReques
 		RunID:  runID,
 		RunLog: make([]schema.JobLogInfo, 0),
 	}
+
+	// get submit log first
+	// if jobid is empty return submit log and run job log
+	var traces []trace_logger.Trace
+	if request.JobID == "" {
+		trace, ok := trace_logger.GetTraceFromCache(runID)
+		if ok {
+			traces = append(traces, trace)
+			// get run job logs
+			for _, job := range jobList {
+				trace, ok := trace_logger.GetTraceFromCache(job.ID)
+				if ok {
+					traces = append(traces, trace)
+				}
+			}
+		}
+	} else {
+		// get run job logs
+		for _, job := range jobList {
+			trace, ok := trace_logger.GetTraceFromCache(job.ID)
+			if ok {
+				traces = append(traces, trace)
+			}
+		}
+	}
+
+	// set submit log
+	if len(traces) == 0 {
+		var runInfo, jobInfo string
+		if runID != "" {
+			runInfo = fmt.Sprintf(" runID[%s]", runID)
+		}
+		if request.JobID != "" {
+			jobInfo = fmt.Sprintf(" jobID[%s]", request.JobID)
+		}
+		msg := fmt.Sprintf("get trace log failed.%s%s", runInfo, jobInfo)
+		ctx.Logging().Warnf(msg)
+		response.SubmitLog = msg
+	} else {
+		traceStrs := make([]string, 0, len(traces))
+		for _, t := range traces {
+			traceStrs = append(traceStrs, t.String())
+		}
+		response.SubmitLog = strings.Join(traceStrs, "\n")
+	}
+
 	if len(jobList) == 0 {
 		return response, nil
 	}
@@ -101,29 +151,23 @@ func GetRunLog(ctx *logger.RequestContext, runID string, request GetRunLogReques
 		}
 		response.RunLog = append(response.RunLog, jobLogInfo)
 	}
-	trace, ok := trace_logger.GetTraceFromCache(runID)
-	if !ok {
-		ctx.Logging().Warnf("get trace log failed. runID[%s]", runID)
-	} else {
-		response.SubmitLog = trace.String()
-	}
 	return response, nil
 }
 
-func getJobListByRunID(ctx *logger.RequestContext, runID string, jobID string) ([]models.Job, error) {
-	jobList, err := models.GetJobsByRunID(runID, jobID)
+func getJobListByRunID(ctx *logger.RequestContext, runID string, jobID string) ([]model.Job, error) {
+	jobList, err := storage.Job.GetJobsByRunID(runID, jobID)
 	if err != nil {
 		return nil, err
 	}
 	return jobList, nil
 }
 
-func getClusterQueueByQueueID(ctx *logger.RequestContext, queueID string) (*models.ClusterInfo, *models.Queue, error) {
-	queue, err := models.GetQueueByID(queueID)
+func getClusterQueueByQueueID(ctx *logger.RequestContext, queueID string) (*model.ClusterInfo, *model.Queue, error) {
+	queue, err := storage.Queue.GetQueueByID(queueID)
 	if err != nil {
 		return nil, nil, err
 	}
-	clusterInfo, err := models.GetClusterById(queue.ClusterId)
+	clusterInfo, err := storage.Cluster.GetClusterById(queue.ClusterId)
 	if err != nil {
 		return nil, nil, err
 	}

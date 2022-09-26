@@ -17,18 +17,22 @@ limitations under the License.
 package location_awareness
 
 import (
+	"encoding/json"
 	"math/rand"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/disk"
 	log "github.com/sirupsen/logrus"
+	k8sCore "k8s.io/api/core/v1"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/common/http/api"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/common/http/core"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 )
 
-func ReportCacheLoop(cacheReport api.CacheReportParams, podCachePath string, httpClient *core.PaddleFlowClient) error {
-	var err, errStat error
+func PatchCacheStatsLoop(k8sClient utils.Client, pod *k8sCore.Pod,
+	fsID, cacheDir, nodname, podCachePath string) {
+	var errStat error
 	var usageStat *disk.UsageStat
 	for {
 		usageStat, errStat = disk.Usage(podCachePath)
@@ -37,14 +41,27 @@ func ReportCacheLoop(cacheReport api.CacheReportParams, podCachePath string, htt
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		cacheReport.UsedSize = int(usageStat.Used / 1024)
-		err = api.CacheReportRequest(cacheReport, httpClient)
+
+		cacheStats := model.CacheStats{
+			FsID:     fsID,
+			CacheDir: cacheDir,
+			NodeName: nodname,
+			UsedSize: int(usageStat.Used / 1024),
+		}
+
+		str, err := json.Marshal(cacheStats)
 		if err != nil {
-			log.Errorf("cache report failed with params[%+v] and err[%v]", cacheReport, err)
+			log.Errorf("failed marshal cache stats %+v, err: %v", cacheStats, err)
+			continue
+		}
+
+		pod.ObjectMeta.Annotations[schema.AnnotationKeyCache] = string(str)
+		err = k8sClient.PatchPodAnnotation(pod)
+		if err != nil {
+			log.Errorf("PatchPodAnnotation %+v err[%v]", pod.ObjectMeta.Annotations, err)
 		}
 		select {
-		case <-time.After(time.Duration(1+rand.Intn(3)) * time.Second):
+		case <-time.After(time.Duration(15+rand.Intn(10)) * time.Second):
 		}
 	}
-	return nil
 }

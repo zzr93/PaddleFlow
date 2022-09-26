@@ -43,7 +43,6 @@ import (
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/common"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/resources"
@@ -51,7 +50,9 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/api"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime/kubernetes/controller"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime/kubernetes/executor"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/trace_logger"
 )
 
 type KubeRuntime struct {
@@ -67,7 +68,7 @@ func NewKubeRuntime(cluster schema.Cluster) RuntimeService {
 	return kr
 }
 
-func getFileSystem(jobConf schema.Conf, tasks []models.Member) []schema.FileSystem {
+func getFileSystem(jobConf schema.Conf, tasks []schema.Member) []schema.FileSystem {
 	fileSystems := jobConf.GetAllFileSystem()
 	for _, task := range tasks {
 		fileSystems = append(fileSystems, task.Conf.GetAllFileSystem()...)
@@ -130,8 +131,14 @@ func (kr *KubeRuntime) Init() error {
 }
 
 func (kr *KubeRuntime) SubmitJob(jobInfo *api.PFJob) error {
-	log.Infof("submit job[%v] to cluster[%s] queue[%s]", jobInfo.ID, kr.cluster.ID, jobInfo.QueueID)
+	// add trace log point
+	jobID := jobInfo.ID
+	traceLogger := trace_logger.KeyWithUpdate(jobID)
+	msg := fmt.Sprintf("submit job[%v] to cluster[%s] queue[%s]", jobInfo.ID, kr.cluster.ID, jobInfo.QueueID)
+	log.Infof(msg)
+	traceLogger.Infof(msg)
 	// prepare kubernetes storage
+	traceLogger.Infof("prepare kubernetes storage")
 	jobFileSystems := getFileSystem(jobInfo.Conf, jobInfo.Tasks)
 	for _, fs := range jobFileSystems {
 		fsID := common.ID(jobInfo.UserName, fs.Name)
@@ -140,7 +147,9 @@ func (kr *KubeRuntime) SubmitJob(jobInfo *api.PFJob) error {
 			log.Errorf("create pv for job[%s] failed, err: %v", jobInfo.ID, err)
 			return err
 		}
-		log.Infof("SubmitJob CreatePV fsID=%s pvName=%s", fsID, pvName)
+		msg = fmt.Sprintf("SubmitJob CreatePV fsID=%s pvName=%s", fsID, pvName)
+		log.Infof(msg)
+		traceLogger.Infof(msg)
 		err = kr.CreatePVC(jobInfo.Namespace, fsID, pvName)
 		if err != nil {
 			log.Errorf("create pvc for job[%s] failed, err: %v", jobInfo.ID, err)
@@ -148,16 +157,19 @@ func (kr *KubeRuntime) SubmitJob(jobInfo *api.PFJob) error {
 		}
 	}
 	// submit job
+	traceLogger.Infof("new kube job")
 	job, err := executor.NewKubeJob(jobInfo, kr.dynamicClientOpt)
 	if err != nil {
 		log.Warnf("new kubernetes job[%s] failed, err: %v", jobInfo.ID, err)
 		return err
 	}
-	jobID, err := job.CreateJob()
+	traceLogger.Infof("create job")
+	jobID, err = job.CreateJob()
 	if err != nil {
 		log.Warnf("create kubernetes job[%s] failed, err: %v", jobInfo.Name, err)
 		return err
 	}
+
 	log.Debugf("submit job[%s] successful", jobID)
 	return nil
 }
@@ -310,7 +322,7 @@ func (kr *KubeRuntime) SyncQueue(stopCh <-chan struct{}) {
 
 }
 
-func (kr *KubeRuntime) CreateQueue(q *models.Queue) error {
+func (kr *KubeRuntime) CreateQueue(q *model.Queue) error {
 	switch q.QuotaType {
 	case schema.TypeVolcanoCapabilityQuota:
 		return kr.createVCQueue(q)
@@ -321,7 +333,7 @@ func (kr *KubeRuntime) CreateQueue(q *models.Queue) error {
 	}
 }
 
-func (kr *KubeRuntime) createVCQueue(q *models.Queue) error {
+func (kr *KubeRuntime) createVCQueue(q *model.Queue) error {
 	capability := k8s.NewResourceList(q.MaxResources)
 	log.Debugf("CreateQueue resourceList[%v]", capability)
 
@@ -344,7 +356,7 @@ func (kr *KubeRuntime) createVCQueue(q *models.Queue) error {
 	return nil
 }
 
-func (kr *KubeRuntime) createElasticResourceQuota(q *models.Queue) error {
+func (kr *KubeRuntime) createElasticResourceQuota(q *model.Queue) error {
 	maxResources := k8s.NewResourceList(q.MaxResources)
 	minResources := k8s.NewResourceList(q.MinResources)
 	log.Debugf("Elastic resource quota max resources:%v,  min resources %v", maxResources, minResources)
@@ -369,7 +381,7 @@ func (kr *KubeRuntime) createElasticResourceQuota(q *models.Queue) error {
 	return nil
 }
 
-func (kr *KubeRuntime) DeleteQueue(q *models.Queue) error {
+func (kr *KubeRuntime) DeleteQueue(q *model.Queue) error {
 	var gvk = k8s.VCQueueGVK
 	switch q.QuotaType {
 	case schema.TypeVolcanoCapabilityQuota:
@@ -388,7 +400,7 @@ func (kr *KubeRuntime) DeleteQueue(q *models.Queue) error {
 	return nil
 }
 
-func (kr *KubeRuntime) CloseQueue(q *models.Queue) error {
+func (kr *KubeRuntime) CloseQueue(q *model.Queue) error {
 	switch q.QuotaType {
 	case schema.TypeVolcanoCapabilityQuota:
 		return kr.executeVCQueueAction(q, busv1alpha1.CloseQueueAction)
@@ -399,7 +411,7 @@ func (kr *KubeRuntime) CloseQueue(q *models.Queue) error {
 	}
 }
 
-func (kr *KubeRuntime) executeVCQueueAction(q *models.Queue, action busv1alpha1.Action) error {
+func (kr *KubeRuntime) executeVCQueueAction(q *model.Queue, action busv1alpha1.Action) error {
 	obj, err := executor.Get("", q.Name, k8s.VCQueueGVK, kr.dynamicClientOpt)
 	if err != nil {
 		log.Errorf("execute queue action get queue failed. queueName:[%s]", q.Name)
@@ -425,7 +437,7 @@ func (kr *KubeRuntime) executeVCQueueAction(q *models.Queue, action busv1alpha1.
 	return nil
 }
 
-func (kr *KubeRuntime) UpdateQueue(q *models.Queue) error {
+func (kr *KubeRuntime) UpdateQueue(q *model.Queue) error {
 	switch q.QuotaType {
 	case schema.TypeVolcanoCapabilityQuota:
 		return kr.updateVCQueue(q)
@@ -436,7 +448,7 @@ func (kr *KubeRuntime) UpdateQueue(q *models.Queue) error {
 	}
 }
 
-func (kr *KubeRuntime) updateVCQueue(q *models.Queue) error {
+func (kr *KubeRuntime) updateVCQueue(q *model.Queue) error {
 	capability := k8s.NewResourceList(q.MaxResources)
 	log.Debugf("UpdateQueue resourceList[%v]", capability)
 	object, err := executor.Get("", q.Name, k8s.VCQueueGVK, kr.dynamicClientOpt)
@@ -457,7 +469,7 @@ func (kr *KubeRuntime) updateVCQueue(q *models.Queue) error {
 	return nil
 }
 
-func (kr *KubeRuntime) updateElasticResourceQuota(q *models.Queue) error {
+func (kr *KubeRuntime) updateElasticResourceQuota(q *model.Queue) error {
 	maxResources := k8s.NewResourceList(q.MaxResources)
 	minResources := k8s.NewResourceList(q.MinResources)
 	log.Debugf("Elastic resource quota max resources:%v,  min resources %v", maxResources, minResources)
@@ -490,7 +502,7 @@ func (kr *KubeRuntime) updateElasticResourceQuota(q *models.Queue) error {
 	return nil
 }
 
-func (kr *KubeRuntime) GetQueueUsedQuota(q *models.Queue) (*resources.Resource, error) {
+func (kr *KubeRuntime) GetQueueUsedQuota(q *model.Queue) (*resources.Resource, error) {
 	log.Infof("get used quota for queue %s, namespace %s", q.Name, q.Namespace)
 
 	fieldSelector := fmt.Sprintf(
@@ -599,7 +611,7 @@ func (kr *KubeRuntime) CreatePV(namespace, fsID string) (string, error) {
 		log.Errorf(err.Error())
 		return "", err
 	}
-	if err := buildPV(newPV, fsID); err != nil {
+	if err := kr.buildPV(newPV, fsID); err != nil {
 		log.Errorf(err.Error())
 		return "", err
 	}
@@ -610,7 +622,7 @@ func (kr *KubeRuntime) CreatePV(namespace, fsID string) (string, error) {
 	return pv.Name, nil
 }
 
-func buildPV(pv *apiv1.PersistentVolume, fsID string) error {
+func (kr *KubeRuntime) buildPV(pv *apiv1.PersistentVolume, fsID string) error {
 	// filesystem
 	fs, err := storage.Filesystem.GetFileSystemWithFsID(fsID)
 	if err != nil {
@@ -640,10 +652,10 @@ func buildPV(pv *apiv1.PersistentVolume, fsID string) error {
 
 	// set VolumeAttributes
 	pv.Spec.CSI.VolumeHandle = pv.Name
-	pv.Spec.CSI.VolumeAttributes[schema.PfsServer] = config.GetServiceAddress()
-	pv.Spec.CSI.VolumeAttributes[schema.PfsFsID] = fsID
-	pv.Spec.CSI.VolumeAttributes[schema.PfsFsInfo] = base64.StdEncoding.EncodeToString(fsStr)
-	pv.Spec.CSI.VolumeAttributes[schema.PfsFsCache] = base64.StdEncoding.EncodeToString(fsCacheConfigStr)
+	pv.Spec.CSI.VolumeAttributes[schema.PFSID] = fsID
+	pv.Spec.CSI.VolumeAttributes[schema.PFSClusterID] = kr.cluster.ID
+	pv.Spec.CSI.VolumeAttributes[schema.PFSInfo] = base64.StdEncoding.EncodeToString(fsStr)
+	pv.Spec.CSI.VolumeAttributes[schema.PFSCache] = base64.StdEncoding.EncodeToString(fsCacheConfigStr)
 	return nil
 }
 

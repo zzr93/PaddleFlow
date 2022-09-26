@@ -49,8 +49,7 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/meta"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/vfs"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/common"
-	csiMount "github.com/PaddlePaddle/PaddleFlow/pkg/fs/csiplugin/mount"
-	mountUtil "github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils/mount"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/monitor"
 )
 
@@ -100,7 +99,7 @@ func setup(c *cli.Context) error {
 		return fmt.Errorf("invalid mountpoint: %s", mountPoint)
 	}
 
-	isMounted, err := mountUtil.IsMountPoint(mountPoint)
+	isMounted, err := utils.IsMountPoint(mountPoint)
 	if isMounted {
 		if err != nil {
 			if errUmount := doUmount(mountPoint, true); errUmount != nil {
@@ -137,7 +136,6 @@ func setup(c *cli.Context) error {
 		log.Errorf("init vfs failed: %v", err)
 		return err
 	}
-	signalHandle(mountPoint)
 	go monitor.UpdateBaseMetrics()
 	// whether start metrics server
 	if c.Bool("metrics-service-on") {
@@ -149,6 +147,19 @@ func setup(c *cli.Context) error {
 			http.ListenAndServe(fmt.Sprintf(":%d", c.Int("pprof-port")), nil)
 		}()
 	}
+
+	if c.Bool("clean-cache") {
+		if c.String("meta-cache-path") != "" {
+			cleanCacheInfo.CachePaths = append(cleanCacheInfo.CachePaths, c.String("meta-cache-path"))
+		}
+		if c.String("data-cache-path") != "" {
+			cleanCacheInfo.CachePaths = append(cleanCacheInfo.CachePaths, c.String("data-cache-path"))
+		}
+		if len(cleanCacheInfo.CachePaths) > 0 {
+			cleanCacheInfo.Clean = true
+		}
+	}
+	signalHandle(mountPoint)
 	return nil
 }
 
@@ -218,7 +229,21 @@ func mount(c *cli.Context) error {
 		os.Exit(-1)
 	}
 	server.Wait()
-	return err
+	return cleanCache()
+}
+
+func cleanCache() (errRet error) {
+	// clean cache if set
+	if cleanCacheInfo.Clean {
+		log.Infof("start clean cache dir: %+v", cleanCacheInfo)
+		for _, dir := range cleanCacheInfo.CachePaths {
+			if err := os.RemoveAll(dir); err != nil {
+				log.Errorf("doUmount: remove path[%s] failed: %v", dir, err)
+				errRet = err
+			}
+		}
+	}
+	return errRet
 }
 
 func InitVFS(c *cli.Context, registry *prometheus.Registry) error {
@@ -245,7 +270,7 @@ func InitVFS(c *cli.Context, registry *prometheus.Registry) error {
 			}
 		}
 	} else if c.String(schema.FuseKeyFsInfo) != "" {
-		fs, err := csiMount.ProcessFsInfo(c.String(schema.FuseKeyFsInfo))
+		fs, err := utils.ProcessFSInfo(c.String(schema.FuseKeyFsInfo))
 		if err != nil {
 			retErr := fmt.Errorf("InitVFS process fs info[%s] err: %v", c.String(schema.FuseKeyFsInfo), err)
 			log.Errorf(retErr.Error())
@@ -337,6 +362,7 @@ func InitVFS(c *cli.Context, registry *prometheus.Registry) error {
 		AttrCacheExpire:  c.Duration("meta-cache-expire"),
 		EntryCacheExpire: c.Duration("entry-cache-expire"),
 		Config: kv.Config{
+			FsID:      fsMeta.ID,
 			Driver:    c.String("meta-cache-driver"),
 			CachePath: c.String("meta-cache-path"),
 		},
@@ -381,7 +407,13 @@ func signalHandle(mp string) {
 		for {
 			waitForSignal := <-signalChan
 			log.Infof("fuse exit with signal %v", waitForSignal)
-			go func() { _ = doUmount(mp, true) }()
+			go func() {
+				if doUmount(mp, false) != nil {
+					if err := doUmount(mp, true); err != nil {
+						log.Errorf("doUmount failed: %v", err)
+					}
+				}
+			}()
 			go func() {
 				time.Sleep(time.Second * 3)
 				os.Exit(1)

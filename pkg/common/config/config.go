@@ -17,6 +17,8 @@ limitations under the License.
 package config
 
 import (
+	"time"
+
 	apiv1 "k8s.io/api/core/v1"
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
@@ -27,6 +29,9 @@ var (
 	GlobalServerConfig *ServerConfig                // the global ServerConfig
 	DefaultPV          *apiv1.PersistentVolume      // the global default pv instance
 	DefaultPVC         *apiv1.PersistentVolumeClaim // the global default pvc instance
+	DefaultJobTemplate map[string][]byte            // the global default job template
+
+	defaultJobTemplatePath = "./config/server/default/job/job_template.yaml"
 
 	DefaultRunYamlPath    = "./run.yaml"
 	serverDefaultConfPath = "./config/server/default/paddleserver.yaml"
@@ -47,6 +52,7 @@ type ServerConfig struct {
 	Fs        FsServerConf                   `yaml:"fs"`
 	ImageConf ImageConfig                    `yaml:"imageRepository"`
 	Monitor   PrometheusConfig               `yaml:"monitor"`
+	Metrics   MetricsConfig                  `yaml:"metrics"`
 }
 
 type StorageConfig struct {
@@ -65,6 +71,7 @@ type StorageConfig struct {
 }
 
 type ApiServerConfig struct {
+	// Host Port used for FS to create pv/pvc with volumeAttributes point pfs-server pod
 	Host                string `yaml:"host"`
 	Port                int    `yaml:"port"`
 	TokenExpirationHour int    `yaml:"tokenExpirationHour"`
@@ -82,16 +89,18 @@ type JobConfig struct {
 	SyncClusterQueue bool `yaml:"syncClusterQueue"`
 	// DefaultJobYamlDir is directory that stores default template yaml files for job
 	DefaultJobYamlDir string `yaml:"defaultJobYamlDir"`
-	IsSingleCluster   bool   `yaml:"isSingleCluster"`
+	// DefaultJobYamlPath defines file path that stores all default templates in one yaml
+	DefaultJobYamlPath string `yaml:"defaultJobYamlPath"`
+	IsSingleCluster    bool   `yaml:"isSingleCluster"`
 }
 
 type FsServerConf struct {
-	DefaultPVPath     string `yaml:"defaultPVPath"`
-	DefaultPVCPath    string `yaml:"defaultPVCPath"`
-	LinkMetaDirPrefix string `yaml:"linkMetaDirPrefix"`
-	// K8sServiceName K8sServicePort used to create pv/pvc with volumeAttributes point pfs-server pod
-	K8sServiceName string `yaml:"k8sServiceName"`
-	K8sServicePort int    `yaml:"k8sServicePort"`
+	DefaultPVPath             string        `yaml:"defaultPVPath"`
+	DefaultPVCPath            string        `yaml:"defaultPVCPath"`
+	LinkMetaDirPrefix         string        `yaml:"linkMetaDirPrefix"`
+	MountPodExpire            time.Duration `yaml:"mountPodExpire"`
+	CleanMountPodIntervalTime time.Duration `yaml:"cleanMountPodIntervalTime"`
+	SyncCacheStatsInterval    time.Duration `yaml:"syncCacheStatsInterval"`
 }
 
 type ReclaimConfig struct {
@@ -114,4 +123,9 @@ type ImageConfig struct {
 type PrometheusConfig struct {
 	Server              string `yaml:"server"`
 	ExporterServicePort int    `yaml:"exporterServicePort"`
+}
+
+type MetricsConfig struct {
+	Port   int  `yaml:"port"`
+	Enable bool `yaml:"enable"`
 }

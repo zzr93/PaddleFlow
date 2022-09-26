@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -123,4 +124,87 @@ func TopologicalSort(components map[string]schema.Component) ([]string, error) {
 		}
 	}
 	return sortedComponent, nil
+}
+
+func LatestTime(times []time.Time) time.Time {
+	latestTime := time.Time{}
+
+	for _, t := range times {
+		if latestTime.Before(t) {
+			latestTime = t
+		}
+	}
+
+	return latestTime
+}
+
+func GetFSMountPath(FS *schema.FsMount) string {
+	if FS.MountPath != "" {
+		return FS.MountPath
+	} else {
+		return fmt.Sprintf("/home/paddleflow/storage/mnt/%s", FS.ID)
+	}
+}
+
+func GetArtifactMountPath(mainFS *schema.FsMount, artifactPath string) string {
+	mountPath := GetFSMountPath(mainFS)
+	mountPath = strings.TrimRight(mountPath, "/")
+	subPath := strings.TrimRight(mainFS.SubPath, "/")
+
+	artMountPaths := []string{}
+
+	for _, path := range strings.Split(artifactPath, ",") {
+		if path == "" {
+			continue
+		}
+
+		var artMountPath string
+		if subPath != "" {
+			artMountPath = strings.Replace(path, subPath, mountPath, 1)
+		} else {
+			artMountPath = fmt.Sprintf("%s/%s", mountPath, path)
+		}
+
+		if !strings.HasPrefix(artMountPath, "/") {
+			artMountPath = "/" + artMountPath
+		}
+
+		artMountPaths = append(artMountPaths, artMountPath)
+	}
+
+	return strings.Join(artMountPaths, ",")
+}
+
+func GetSiblingAbsoluteName(curAbsName string, siblingRelativeName string) string {
+	nameList := strings.Split(curAbsName, ".")
+	parentAbsName := strings.Join(nameList[:len(nameList)-1], ".")
+	var sibAbsName string
+	if parentAbsName != "" {
+		sibAbsName = parentAbsName + "." + siblingRelativeName
+	} else {
+		sibAbsName = siblingRelativeName
+	}
+	return sibAbsName
+}
+
+func CheckListParam(param []interface{}) error {
+	for _, listItem := range param {
+		switch listItem := listItem.(type) {
+		case float32, float64, int, int64:
+			// do nothing
+		case string:
+			checker := VariableChecker{}
+			// list中的元素不能为模板，如果使用了模板，则报错
+			if err := checker.CheckRefArgument(listItem); err == nil {
+				return fmt.Errorf("list param item [%v] is invalid, each item must not be templete", listItem)
+			}
+		case []interface{}:
+			if err := CheckListParam(listItem); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("list param item can only be int, float, string, list type")
+		}
+	}
+	return nil
 }

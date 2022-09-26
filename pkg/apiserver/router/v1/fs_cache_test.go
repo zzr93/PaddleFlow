@@ -23,7 +23,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/common"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/controller/fs"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
@@ -41,27 +40,21 @@ func mockFSCache() model.FSCacheConfig {
 	return model.FSCacheConfig{
 		FsID:           mockFsID,
 		CacheDir:       "/abs/path",
-		MetaDriver:     "nutsdb",
+		MetaDriver:     "leveldb",
 		BlockSize:      666,
 		ExtraConfigMap: map[string]string{"abc": "def"},
 	}
 }
 
-func buildUpdateReq(model model.FSCacheConfig) fs.UpdateFileSystemCacheRequest {
-	return fs.UpdateFileSystemCacheRequest{
-		FsID:        model.FsID,
-		CacheDir:    model.CacheDir,
-		MetaDriver:  "nutsdb",
-		BlockSize:   model.BlockSize,
-		ExtraConfig: map[string]string{"aa": "bb"},
-	}
-}
-
 func buildCreateReq(model model.FSCacheConfig) fs.CreateFileSystemCacheRequest {
 	req := fs.CreateFileSystemCacheRequest{
-		Username:                     MockRootUser,
-		FsName:                       mockFsName,
-		UpdateFileSystemCacheRequest: buildUpdateReq(model),
+		Username:    MockRootUser,
+		FsName:      mockFsName,
+		FsID:        model.FsID,
+		CacheDir:    model.CacheDir,
+		MetaDriver:  "leveldb",
+		BlockSize:   model.BlockSize,
+		ExtraConfig: map[string]string{"aa": "bb"},
 	}
 	return req
 }
@@ -70,7 +63,6 @@ func TestFSCacheConfigRouter(t *testing.T) {
 	router, baseUrl := prepareDBAndAPI(t)
 	mockFs := mockFS()
 	cacheConf := mockFSCache()
-	updateReq := buildUpdateReq(cacheConf)
 	createRep := buildCreateReq(cacheConf)
 
 	// test create failure - no fs
@@ -108,33 +100,6 @@ func TestFSCacheConfigRouter(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNotFound, result.Code)
 
-	// test update success
-	updateReq.BlockSize = 333
-	updateReq.CacheDir = "/newPath"
-	updateReq.ExtraConfig = map[string]string{"meta-cache-expire": "10s"}
-	result, err = PerformPutRequest(router, urlWithFsID, updateReq)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusOK, result.Code)
-
-	result, err = PerformGetRequest(router, urlWithFsID)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusOK, result.Code)
-	err = ParseBody(result.Body, &cacheRsp)
-	assert.Nil(t, err)
-	assert.Equal(t, updateReq.BlockSize, cacheRsp.BlockSize)
-	assert.Equal(t, updateReq.CacheDir, cacheRsp.CacheDir)
-	assert.Equal(t, updateReq.ExtraConfig, map[string]string{"meta-cache-expire": "10s"})
-
-	// test update failure
-	result, err = PerformPutRequest(router, urlWrong, updateReq)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusNotFound, result.Code)
-
-	updateReq.CacheDir = "newPath" // not abs path
-	result, err = PerformPutRequest(router, urlWithFsID, updateReq)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusBadRequest, result.Code)
-
 	// delete
 	result, err = PerformDeleteRequest(router, urlWithFsID)
 	assert.Nil(t, err)
@@ -144,53 +109,4 @@ func TestFSCacheConfigRouter(t *testing.T) {
 	result, err = PerformDeleteRequest(router, urlWithFsID)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNotFound, result.Code)
-}
-
-func buildReportRequest() fs.CacheReportRequest {
-	req := fs.CacheReportRequest{
-		Username:  MockRootUser,
-		FsName:    mockFsName,
-		ClusterID: "testcluster",
-		CacheDir:  "/var/cache",
-		NodeName:  "abc.com",
-		UsedSize:  100,
-	}
-	return req
-}
-
-func TestFSCacheReportRouter(t *testing.T) {
-	router, baseUrl := prepareDBAndAPI(t)
-	// mockFs := buildMockFS()
-	// cacheConf := buildMockFSCacheConfig()
-	req := buildReportRequest()
-	badReq := fs.CacheReportRequest{
-		Username:  MockRootUser,
-		FsName:    mockFsName,
-		ClusterID: "testcluster",
-		CacheDir:  "/var/cache",
-		NodeName:  "abc.com",
-	}
-	// test create failure - no fs
-	url := baseUrl + "/fsCache/report"
-	result, err := PerformPostRequest(router, url, badReq)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusBadRequest, result.Code)
-
-	result, err = PerformPostRequest(router, url, req)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusOK, result.Code)
-
-	cacheList, err := storage.FsCache.List(common.ID(MockRootUser, mockFsName), "")
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(cacheList))
-
-	req.UsedSize = 200
-	result, err = PerformPostRequest(router, url, req)
-	assert.Nil(t, err)
-	assert.Equal(t, http.StatusOK, result.Code)
-
-	cacheList, err = storage.FsCache.List(common.ID(MockRootUser, mockFsName), "")
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(cacheList))
-	assert.Equal(t, 200, cacheList[0].UsedSize)
 }

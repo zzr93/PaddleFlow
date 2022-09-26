@@ -32,7 +32,7 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
-	fsCommon "github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils/common"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
@@ -122,7 +122,10 @@ type CreateFileSystemClaimsResponse struct {
 }
 
 func (s *FileSystemService) HasFsPermission(username, fsID string) (bool, error) {
-	fsName, owner := fsCommon.FsIDToFsNameUsername(fsID)
+	fsName, owner, err := utils.GetFsNameAndUserNameByFsID(fsID)
+	if err != nil {
+		return false, err
+	}
 	fs, err := s.GetFileSystem(owner, fsName)
 	if err != nil {
 		return false, err
@@ -182,7 +185,7 @@ func (s *FileSystemService) DeleteFileSystem(ctx *logger.RequestContext, fsID st
 	}
 
 	// delete filesystem, links, cache config in DB
-	return models.WithTransaction(storage.DB, func(tx *gorm.DB) error {
+	return storage.WithTransaction(storage.DB, func(tx *gorm.DB) error {
 		// delete filesystem
 		if err := storage.Filesystem.DeleteFileSystem(tx, fsID); err != nil {
 			ctx.Logging().Errorf("delete fs[%s] err: %v", fsID, err)
@@ -241,11 +244,12 @@ func (s *FileSystemService) CheckFsMountedAndCleanResources(fsID string) (bool, 
 		return true, nil
 	}
 
-	if err = removeFsCache(fsID); err != nil {
-		err := fmt.Errorf("removeFsCache[%s] err: %v", fsID, err)
-		log.Errorf(err.Error())
+	if err = storage.FsCache.Delete(fsID, ""); err != nil {
+		err := fmt.Errorf("removeFSCache[%s] failed: %v", fsID, err)
+		log.Error(err.Error())
 		return false, err
 	}
+
 	if err = deleteMountPods(mountPodMap); err != nil {
 		err := fmt.Errorf("delete mount pods with fsID[%s] err: %v", fsID, err)
 		log.Errorf(err.Error())
@@ -261,7 +265,7 @@ func (s *FileSystemService) CheckFsMountedAndCleanResources(fsID string) (bool, 
 
 func getClusterNamespaceMap() (map[*runtime.KubeRuntime][]string, error) {
 	cnm := make(map[*runtime.KubeRuntime][]string)
-	clusters, err := models.ListCluster(0, 0, nil, "")
+	clusters, err := storage.Cluster.ListCluster(0, 0, nil, "")
 	if err != nil {
 		err := fmt.Errorf("list clusters err: %v", err)
 		log.Errorf("getClusterNamespaceMap failed: %v", err)
@@ -319,7 +323,7 @@ func checkFsMounted(cnm map[*runtime.KubeRuntime][]string, fsID string) (bool, m
 
 		for _, po := range pods.Items {
 			for key, targetPath := range po.Annotations {
-				if key != schema.AnnoKeyMTime {
+				if key != schema.AnnotationKeyMTime {
 					log.Debugf("fs[%s] is mounted in pod[%s] with target path[%s]",
 						fsID, po.Name, targetPath)
 					return true, nil, nil
@@ -337,6 +341,27 @@ func deleteMountPods(podMap map[*runtime.KubeRuntime][]k8sCore.Pod) error {
 			// delete pod
 			if err := k8sRuntime.DeletePod(schema.MountPodNamespace, po.Name); err != nil && !k8sErrors.IsNotFound(err) {
 				log.Errorf(fmt.Sprintf("deleteMountPods [%s] failed: %v", po.Name, err))
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func cleanFSCache(podMap map[*runtime.KubeRuntime][]k8sCore.Pod) error {
+	var err error
+	for _, pods := range podMap {
+		for _, pod := range pods {
+			cacheID := pod.Labels[schema.LabelCacheID]
+			log.Debugf("cacheID is %v", cacheID)
+			if cacheID == "" {
+				log.Debugf("cacheId is empty with pod: %+v", pod)
+				continue
+			}
+
+			if err = storage.FsCache.Delete("", cacheID); err != nil {
+				err := fmt.Errorf("removeFSCacheWithCacheID[%s] failed: %v", cacheID, err)
+				log.Error(err.Error())
 				return err
 			}
 		}

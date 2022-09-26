@@ -17,6 +17,7 @@ limitations under the License.
 package v1
 
 import (
+	"math/rand"
 	"net/http"
 	"os"
 	"reflect"
@@ -25,7 +26,6 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/common"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/controller/fs"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
 	fsCommon "github.com/PaddlePaddle/PaddleFlow/pkg/fs/common"
@@ -274,6 +274,18 @@ func Test_validateCreateFileSystem(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "username and filename is wrong",
+			args: args{
+				ctx: ctx,
+				req: &fs.CreateFileSystemRequest{
+					Name:     RandomString(9),
+					Username: RandomString(51),
+					Url:      "test://1123",
+				},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -306,7 +318,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "dir ok",
 			args: args{
-				fsType: common.HDFS,
+				fsType: fsCommon.HDFSType,
 				url:    "hdfs://192.168.1.1:9000,192.168.1.2:9000/myfs",
 			},
 			wantErr: false,
@@ -314,7 +326,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "dir nested up",
 			args: args{
-				fsType: common.HDFS,
+				fsType: fsCommon.HDFSType,
 				url:    "hdfs://192.168.1.3:9000/data/mypath/path",
 			},
 			wantErr: true,
@@ -322,7 +334,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "dir nested down",
 			args: args{
-				fsType: common.HDFS,
+				fsType: fsCommon.HDFSType,
 				url:    "hdfs://192.168.1.3:9000/data",
 			},
 			wantErr: true,
@@ -330,7 +342,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "local",
 			args: args{
-				fsType: common.Local,
+				fsType: fsCommon.LocalType,
 				url:    "local://mypath/data",
 			},
 			wantErr: false,
@@ -338,7 +350,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "s3",
 			args: args{
-				fsType: common.S3,
+				fsType: fsCommon.S3Type,
 				url:    "s3://bucket/datatest",
 				properties: map[string]string{
 					fsCommon.Endpoint: "s3.xxx.com",
@@ -349,7 +361,7 @@ func Test_checkFsDir(t *testing.T) {
 		{
 			name: "mock",
 			args: args{
-				fsType: common.Mock,
+				fsType: fsCommon.MockType,
 				url:    "mock://mypath/data",
 			},
 			wantErr: false,
@@ -488,4 +500,14 @@ func TestCreateFSAndDeleteFs(t *testing.T) {
 	result, err = PerformDeleteRequest(router, deleteUrl)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusForbidden, result.Code)
+}
+
+func RandomString(n int) string {
+	var letterRunes = []rune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
 }

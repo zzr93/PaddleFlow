@@ -1,6 +1,8 @@
 package flag
 
 import (
+	"time"
+
 	"github.com/urfave/cli/v2"
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
@@ -173,17 +175,23 @@ func FilesystemFlags(fsConf *config.FsServerConf) []cli.Flag {
 			Usage:       "PVC config path",
 			Destination: &fsConf.DefaultPVCPath,
 		},
-		&cli.StringFlag{
-			Name:        "pfs-service-name",
-			Value:       fsConf.K8sServiceName,
-			Usage:       "fs-server k8s-service name",
-			Destination: &fsConf.K8sServiceName,
+		&cli.DurationFlag{
+			Name:        "mount-pod-expire",
+			Value:       7 * 24 * time.Hour,
+			Usage:       "the expiration time when the mount pod needs to be destroyed without used",
+			Destination: &fsConf.MountPodExpire,
 		},
-		&cli.IntFlag{
-			Name:        "pfs-service-port",
-			Value:       fsConf.K8sServicePort,
-			Usage:       "fs-server k8s-service port",
-			Destination: &fsConf.K8sServicePort,
+		&cli.DurationFlag{
+			Name:        "clean-pod-interval",
+			Value:       30 * time.Second,
+			Usage:       "the interval time for clean mount pod",
+			Destination: &fsConf.CleanMountPodIntervalTime,
+		},
+		&cli.DurationFlag{
+			Name:        "sync-fscache-stats-interval",
+			Value:       10 * time.Second,
+			Usage:       "the interval time for sync fscache stats",
+			Destination: &fsConf.SyncCacheStatsInterval,
 		},
 	}
 }

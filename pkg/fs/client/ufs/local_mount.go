@@ -29,7 +29,7 @@ import (
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/base"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/common"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils/mount"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils"
 )
 
 const (
@@ -112,7 +112,7 @@ func (fs *localMount) SetXAttr(name string, attr string, data []byte, flags int)
 	return syscall.ENOSYS
 }
 
-func (fs *localMount) Open(name string, flags uint32) (fd base.FileHandle, err error) {
+func (fs *localMount) Open(name string, flags uint32) (fd FileHandle, err error) {
 	flags = flags &^ syscall.O_APPEND
 	f, err := os.OpenFile(fs.GetPath(name), int(flags), 0)
 	if err != nil {
@@ -121,7 +121,7 @@ func (fs *localMount) Open(name string, flags uint32) (fd base.FileHandle, err e
 	return nodefs.NewLoopbackFile(f), nil
 }
 
-func (fs *localMount) Create(name string, flags uint32, mode uint32) (fd base.FileHandle, err error) {
+func (fs *localMount) Create(name string, flags uint32, mode uint32) (fd FileHandle, err error) {
 	flags = flags &^ syscall.O_APPEND
 	f, err := os.OpenFile(fs.GetPath(name), int(flags)|os.O_CREATE, os.FileMode(mode))
 	return nodefs.NewLoopbackFile(f), err
@@ -214,7 +214,7 @@ func NewLocalMountFileSystem(properties map[string]interface{}) (UnderFileStorag
 	subpath := properties[common.SubPath].(string)
 
 	switch mountType {
-	case common.GlusterfsType:
+	case common.GlusterFSType:
 		sourcePath = addr + ":" + subpath
 		args = []string{"-t", "glusterfs"}
 	case common.CFSType:
@@ -224,7 +224,7 @@ func NewLocalMountFileSystem(properties map[string]interface{}) (UnderFileStorag
 		return nil, fmt.Errorf("type[%s] is not exist", mountType)
 	}
 
-	output, err := mount.ExecMount(sourcePath, localPath, args)
+	output, err := utils.ExecMount(sourcePath, localPath, args)
 	if err != nil {
 		log.Errorf("exec %s mount cmd failed: %v, output[%s]", mountType, err, string(output))
 		os.Remove(localPath)
@@ -239,7 +239,7 @@ func NewLocalMountFileSystem(properties map[string]interface{}) (UnderFileStorag
 	}
 
 	runtime.SetFinalizer(fs, func(fs *localMount) {
-		err = mount.ForceUnmount(localPath)
+		err = utils.ForceUnmount(localPath)
 		if err != nil {
 			log.Debugf("force unmount mountPoint[%s] failed: %v", localPath, err)
 		}
@@ -253,6 +253,6 @@ func NewLocalMountFileSystem(properties map[string]interface{}) (UnderFileStorag
 }
 
 func init() {
-	RegisterUFS(common.GlusterfsType, NewLocalMountFileSystem)
+	RegisterUFS(common.GlusterFSType, NewLocalMountFileSystem)
 	RegisterUFS(common.CFSType, NewLocalFileSystem)
 }

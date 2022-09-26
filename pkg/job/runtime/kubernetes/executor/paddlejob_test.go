@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/job/api"
@@ -86,7 +85,7 @@ spec:
 			},
 			Flavour: schema.Flavour{Name: "mockFlavourName", ResourceInfo: schema.ResourceInfo{CPU: "3", Mem: "3"}},
 		},
-		Tasks: []models.Member{
+		Tasks: []schema.Member{
 			{
 				ID:       "task-normal-0001",
 				Replicas: 3,
@@ -111,7 +110,7 @@ spec:
 				},
 			},
 		},
-		ExtensionTemplate: extensionPaddleYaml,
+		ExtensionTemplate: []byte(extensionPaddleYaml),
 	}
 	mockPaddlePSJob = api.PFJob{
 		ID:        "job-normal-0001",
@@ -122,7 +121,7 @@ spec:
 		UserName:  "root",
 		QueueID:   "mockQueueID",
 		Conf:      schema.Conf{},
-		Tasks: []models.Member{
+		Tasks: []schema.Member{
 			{
 				ID:       "task-normal-0001",
 				Replicas: 3,
@@ -148,7 +147,7 @@ spec:
 				},
 			},
 		},
-		ExtensionTemplate: extensionPaddleYaml,
+		ExtensionTemplate: []byte(extensionPaddleYaml),
 	}
 )
 

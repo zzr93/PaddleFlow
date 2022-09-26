@@ -24,7 +24,6 @@ import (
 	"k8s.io/api/core/v1"
 	vcjob "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 
-	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/models"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/errors"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
@@ -35,6 +34,57 @@ const (
 	psPort int32 = 8001
 )
 
+// JobModeParams records the parameters related to job mode
+// Deprecated
+type JobModeParams struct {
+	JobFlavour string // flavour of job in pod or collective mode
+
+	CollectiveJobReplicas string // parameters for Collective job
+
+	PServerReplicas string // server.replicas or driver.replicas of job
+	PServerFlavour  string // server.flavour or driver.flavour of job
+	PServerCommand  string // server.command or driver.command of job
+	WorkerReplicas  string // worker.replicas or executor.replicas of job
+	WorkerFlavour   string // worker.flavour or executor.flavour of job
+	WorkerCommand   string // worker.command or executor.command of job
+}
+
+// newJobModeParams create a JobModeParams for job with jobMode
+func newJobModeParams(conf schema.Conf) JobModeParams {
+	return JobModeParams{
+		PServerReplicas:       conf.GetPSReplicas(),
+		PServerFlavour:        conf.GetPSFlavour(),
+		PServerCommand:        conf.GetPSCommand(),
+		WorkerReplicas:        conf.GetWorkerReplicas(),
+		WorkerFlavour:         conf.GetWorkerFlavour(),
+		WorkerCommand:         conf.GetWorkerCommand(),
+		CollectiveJobReplicas: conf.GetJobReplicas(),
+		JobFlavour:            conf.GetFlavour(),
+	}
+}
+
+func (j *JobModeParams) validatePodMode() error {
+	if len(j.JobFlavour) == 0 {
+		return errors.EmptyFlavourError()
+	}
+	return nil
+}
+
+// validatePSMode validate PServerCommand, WorkerCommand
+func (j *JobModeParams) validatePSMode() error {
+	if len(j.WorkerFlavour) == 0 || len(j.WorkerCommand) == 0 || len(j.PServerFlavour) == 0 || len(j.PServerCommand) == 0 {
+		return errors.EmptyFlavourError()
+	}
+
+	return nil
+}
+
+func (j *JobModeParams) validateCollectiveMode() error {
+	// todo(zhongzichao) validate JobFlavour
+	return nil
+}
+
+// VCJob deprecated
 type VCJob struct {
 	KubeJob
 	JobModeParams
@@ -124,19 +174,6 @@ func (vj *VCJob) CreateJob() (string, error) {
 	return jobID, nil
 }
 
-func (vj *VCJob) StopJobByID(jobID string) error {
-	job, err := models.GetJobByID(jobID)
-	if err != nil {
-		return err
-	}
-	namespace := job.Config.GetNamespace()
-	if err = Delete(namespace, job.ID, k8s.VCJobGVK, vj.DynamicClientOption); err != nil {
-		log.Errorf("stop vcjob %s in namespace %s failed, err %v", job.ID, namespace, err)
-		return err
-	}
-	return nil
-}
-
 func (vj *VCJob) fillPSJobSpec(jobSpec *vcjob.Job) error {
 	vj.Env[schema.EnvJobPSPort] = strconv.FormatInt(int64(psPort), 10)
 
@@ -166,7 +203,7 @@ func (vj *VCJob) fillPSJobSpec(jobSpec *vcjob.Job) error {
 	return nil
 }
 
-func (vj *VCJob) fillTaskInPSMode(vcTask *vcjob.TaskSpec, task models.Member, jobName string) error {
+func (vj *VCJob) fillTaskInPSMode(vcTask *vcjob.TaskSpec, task schema.Member, jobName string) error {
 	log.Infof("fill Task[%s] in PS-Mode", vcTask.Name)
 	vcTask.Replicas = int32(task.Replicas)
 
@@ -184,12 +221,15 @@ func (vj *VCJob) fillTaskInPSMode(vcTask *vcjob.TaskSpec, task models.Member, jo
 	if len(vcTask.Template.Spec.Containers) != 1 {
 		vcTask.Template.Spec.Containers = []v1.Container{{}}
 	}
-	vj.fillContainerInTasks(&vcTask.Template.Spec.Containers[0], task)
-	vcTask.Template.Spec.Containers[0].VolumeMounts = vj.appendMountIfAbsent(vcTask.Template.Spec.Containers[0].VolumeMounts,
-		vj.generateVolumeMount())
+	if err := vj.fillContainerInTasks(&vcTask.Template.Spec.Containers[0], task); err != nil {
+		log.Errorf("fill container in task failed, err=[%v]", err)
+		return err
+	}
+	//vcTask.Template.Spec.Containers[0].VolumeMounts = vj.appendMountIfAbsent(vcTask.Template.Spec.Containers[0].VolumeMounts,
+	//	vj.generateVolumeMount())
 
 	// patch vcTask.Template.Spec.Volumes
-	vcTask.Template.Spec.Volumes = vj.appendVolumeIfAbsent(vcTask.Template.Spec.Volumes, vj.generateVolume())
+	//vcTask.Template.Spec.Volumes = vj.appendVolumeIfAbsent(vcTask.Template.Spec.Volumes, vj.generateVolume())
 
 	return nil
 }
@@ -236,10 +276,13 @@ func (vj *VCJob) fillTaskInPodMode(taskSpec *vcjob.TaskSpec, jobName string) err
 		return fmt.Errorf("vcjob[%s]'s flavour is absent", jobName)
 	}
 	// patch taskSpec.Template.Spec.Containers
-	vj.fillContainerInVcJob(&taskSpec.Template.Spec.Containers[0], vj.Tasks[0].Flavour, vj.Command)
+	if err := vj.fillContainerInVcJob(&taskSpec.Template.Spec.Containers[0], vj.Tasks[0].Flavour, vj.Command); err != nil {
+		log.Errorf("fillContainerInVcJob occur a err[%v]", err)
+		return err
+	}
 
 	// patch taskSpec.Template.Spec.Volumes
-	taskSpec.Template.Spec.Volumes = vj.appendVolumeIfAbsent(taskSpec.Template.Spec.Volumes, vj.generateVolume())
+	//taskSpec.Template.Spec.Volumes = vj.appendVolumeIfAbsent(taskSpec.Template.Spec.Volumes, vj.generateVolume())
 	log.Debugf("fillTaskInPodMode completed: job[%s]-task[%+v]", jobName, taskSpec)
 	return nil
 }
@@ -290,11 +333,31 @@ func (vj *VCJob) fillTaskInCollectiveMode(tasks []vcjob.TaskSpec, jobName string
 		return nil, fmt.Errorf("the num of job[%s]-task must be 1, current is [%d]", jobName, len(vj.Tasks))
 	}
 	// todo : add affinity
-	vj.fillContainerInTasks(&task.Template.Spec.Containers[0], vj.Tasks[0])
-	task.Template.Spec.Containers[0].VolumeMounts = vj.appendMountIfAbsent(task.Template.Spec.Containers[0].VolumeMounts,
-		vj.generateVolumeMount())
+	if err := vj.fillContainerInTasks(&task.Template.Spec.Containers[0], vj.Tasks[0]); err != nil {
+		log.Errorf("fillContainerInTasks for job[%s] failed, err=[%v]", jobName, err)
+		return nil, err
+	}
+	//task.Template.Spec.Containers[0].VolumeMounts = vj.appendMountIfAbsent(task.Template.Spec.Containers[0].VolumeMounts,
+	//	vj.generateVolumeMount())
 	// patch task.Template.Spec.Volumes
-	task.Template.Spec.Volumes = vj.appendVolumeIfAbsent(task.Template.Spec.Volumes, vj.generateVolume())
+	//task.Template.Spec.Volumes = vj.appendVolumeIfAbsent(task.Template.Spec.Volumes, vj.generateVolume())
 
 	return tasks, nil
+}
+
+// todo: to be removed
+// fillContainerInVcJob fill container in job task, only called by vcjob
+func (j *VCJob) fillContainerInVcJob(container *v1.Container, flavour schema.Flavour, command string) error {
+	container.Image = j.Image
+	// fill command
+	j.fillCMDInContainer(container, nil)
+	var err error
+	container.Resources, err = j.generateResourceRequirements(flavour)
+	if err != nil {
+		log.Errorf("generate resource requirements failed in vcjob, err: %v", err)
+		return err
+	}
+	//container.VolumeMounts = j.appendMountIfAbsent(container.VolumeMounts, j.generateVolumeMount())
+	container.Env = j.generateEnvVars()
+	return nil
 }
