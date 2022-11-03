@@ -25,7 +25,6 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -43,11 +42,11 @@ import (
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/logger"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/base"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/cache"
+	cache "github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/cache"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/fuse"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/kv"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/meta"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/vfs"
+	kv "github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/kv"
+	meta "github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/meta"
+	vfs "github.com/PaddlePaddle/PaddleFlow/pkg/fs/client/vfs"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/common"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/utils"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/monitor"
@@ -142,7 +141,7 @@ func setup(c *cli.Context) error {
 		metricsAddr := exposeMetricsService(c.String("server"), c.Int("metrics-service-port"))
 		log.Debugf("mount opts: %+v, metricsAddr: %s", opts, metricsAddr)
 	}
-	if c.Bool("pprof-enable") {
+	if c.Int("pprof-port") != 0 {
 		go func() {
 			http.ListenAndServe(fmt.Sprintf(":%d", c.Int("pprof-port")), nil)
 		}()
@@ -260,15 +259,6 @@ func InitVFS(c *cli.Context, registry *prometheus.Registry) error {
 			UfsType: common.LocalType,
 			SubPath: localRoot,
 		}
-		linkPath, linkRoot := c.String("link-path"), c.String("link-root")
-		if linkPath != "" && linkRoot != "" {
-			links = map[string]common.FSMeta{
-				path.Clean(linkPath): common.FSMeta{
-					UfsType: common.LocalType,
-					SubPath: linkRoot,
-				},
-			}
-		}
 	} else if c.String(schema.FuseKeyFsInfo) != "" {
 		fs, err := utils.ProcessFSInfo(c.String(schema.FuseKeyFsInfo))
 		if err != nil {
@@ -361,6 +351,7 @@ func InitVFS(c *cli.Context, registry *prometheus.Registry) error {
 	m := meta.Config{
 		AttrCacheExpire:  c.Duration("meta-cache-expire"),
 		EntryCacheExpire: c.Duration("entry-cache-expire"),
+		PathCacheExpire:  c.Duration("path-cache-expire"),
 		Config: kv.Config{
 			FsID:      fsMeta.ID,
 			Driver:    c.String("meta-cache-driver"),

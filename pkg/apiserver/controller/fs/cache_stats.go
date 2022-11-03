@@ -17,9 +17,8 @@ limitations under the License.
 package fs
 
 import (
-	"encoding/json"
 	"fmt"
-	"time"
+	"strconv"
 
 	log "github.com/sirupsen/logrus"
 	k8sCore "k8s.io/api/core/v1"
@@ -27,19 +26,10 @@ import (
 
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/schema"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/fs/csiplugin/csiconfig"
-	"github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime"
+	runtime "github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime_v2"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/model"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
 )
-
-func SummarizeCacheStatsLoop(scrapeCacheInterval time.Duration) {
-	for {
-		if err := scrapeCacheStats(); err != nil {
-			log.Errorf("scrapeCacheStats err: %v", err)
-		}
-		time.Sleep(scrapeCacheInterval)
-	}
-}
 
 func scrapeCacheStats() error {
 	crm, err := getClusterRuntimeMap()
@@ -78,8 +68,13 @@ func getClusterRuntimeMap() (map[string]*runtime.KubeRuntime, error) {
 }
 
 func updateMountPodCacheStats(clusterID string, k8sRuntime *runtime.KubeRuntime) error {
+	// label indicating a mount pod
+	label := csiconfig.PodTypeKey + "=" + csiconfig.PodMount
+	// label indicating using cache
+	label += "," + schema.LabelKeyCacheID
 	listOptions := k8sMeta.ListOptions{
-		LabelSelector: fmt.Sprintf(csiconfig.PodTypeKey + "=" + csiconfig.PodMount),
+		LabelSelector: label,
+		FieldSelector: "status.phase=Running",
 	}
 	pods, err := k8sRuntime.ListPods(schema.MountPodNamespace, listOptions)
 	if err != nil {
@@ -97,32 +92,52 @@ func updateMountPodCacheStats(clusterID string, k8sRuntime *runtime.KubeRuntime)
 }
 
 func syncCacheFromMountPod(pod *k8sCore.Pod, clusterID string) error {
-	for k, v := range pod.Annotations {
-		if k == schema.AnnotationKeyCache {
-			log.Debugf("mount pod %s in cluster[%s] has cache stats: %s", pod.Name, clusterID, v)
-			var stats model.CacheStats
-			if err := json.Unmarshal([]byte(v), &stats); err != nil {
-				errRet := fmt.Errorf("unmarshal cache stats %s from pod[%s] in cluster[%s] failed: %v", v, pod.Name, clusterID, err)
+	if pod.Labels == nil || pod.Annotations == nil {
+		errRet := fmt.Errorf("mount pod[%s] Labels or Annotations is nil", pod.Name)
+		log.Errorf(errRet.Error())
+		return errRet
+	}
+	fsCache := &model.FSCache{ClusterID: clusterID}
+	for k, v := range pod.Labels {
+		switch k {
+		case schema.LabelKeyUsedSize:
+			usedSize, err := strconv.Atoi(v)
+			if err != nil {
+				errRet := fmt.Errorf("mount pod[%s] used size %s failed to convert to int err: %v", pod.Name, v, err)
 				log.Errorf(errRet.Error())
 				return errRet
 			}
-
-			fsCache := &model.FSCache{
-				FsID:      stats.FsID,
-				CacheDir:  stats.CacheDir,
-				NodeName:  stats.NodeName,
-				UsedSize:  stats.UsedSize,
-				ClusterID: clusterID,
-			}
-			if err := addOrUpdateFSCache(fsCache); err != nil {
-				errRet := fmt.Errorf("addOrUpdateFSCache[%+v] for pod[%s] in cluster[%s] failed: %v", *fsCache, pod.Name, clusterID, err)
-				log.Errorf(errRet.Error())
-				return errRet
-			}
-			return nil
+			fsCache.UsedSize = usedSize
+		case schema.LabelKeyFsID:
+			fsCache.FsID = v
+		case schema.LabelKeyNodeName:
+			fsCache.NodeName = v
+		case schema.LabelKeyCacheID:
+			fsCache.CacheID = v
 		}
 	}
-	log.Debugf("no cache info from mount pod[%s] in cluster[%s]", pod.Name, clusterID)
+
+	cacheDir, ok := pod.Annotations[schema.AnnotationKeyCacheDir]
+	if !ok {
+		errRet := fmt.Errorf("mount pod[%s] cache dir not exist in annotation", pod.Name)
+		log.Errorf(errRet.Error())
+		return errRet
+	}
+	fsCache.CacheDir = cacheDir
+
+	if fsCache.FsID == "" ||
+		fsCache.CacheID == "" ||
+		fsCache.NodeName == "" {
+		errRet := fmt.Errorf("mount pod[%s] cache stats %+v is not valid", pod.Name, fsCache)
+		log.Errorf(errRet.Error())
+		return errRet
+	}
+
+	if err := addOrUpdateFSCache(fsCache); err != nil {
+		errRet := fmt.Errorf("addOrUpdateFSCache[%+v] for pod[%s] failed: %v", *fsCache, pod.Name, err)
+		log.Errorf(errRet.Error())
+		return errRet
+	}
 	return nil
 }
 

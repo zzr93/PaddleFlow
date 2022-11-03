@@ -117,25 +117,6 @@ func (sj *KubeSparkJob) buildSchedulingPolicy(jobApp *v1beta2.SparkApplication, 
 }
 
 func (sj *KubeSparkJob) builtinSparkJob(jobApp *v1beta2.SparkApplication, job *api.PFJob) error {
-	// image
-	jobApp.Spec.Image = &job.Conf.Image
-	if job.Conf.Env == nil {
-		return fmt.Errorf("job env for mainAppFile, mainClass, or arguments is nil")
-	}
-	// mainAppFile, mainClass and arguments
-	sparkMainFile, find := job.Conf.Env[pfschema.EnvJobSparkMainFile]
-	if find {
-		jobApp.Spec.MainApplicationFile = &sparkMainFile
-	}
-	sparkMainClass, find := job.Conf.Env[pfschema.EnvJobSparkMainClass]
-	if find {
-		jobApp.Spec.MainClass = &sparkMainClass
-	}
-	sparkArguments, find := job.Conf.Env[pfschema.EnvJobSparkArguments]
-	if find {
-		jobApp.Spec.Arguments = []string{sparkArguments}
-	}
-
 	// resource of driver and executor
 	var taskFileSystem []pfschema.FileSystem
 	var err error
@@ -160,11 +141,29 @@ func (sj *KubeSparkJob) builtinSparkJob(jobApp *v1beta2.SparkApplication, job *a
 }
 
 func (sj *KubeSparkJob) buildSparkDriverSpec(jobApp *v1beta2.SparkApplication, task pfschema.Member) error {
-	err := sj.buildSparkPodSpec(&jobApp.Spec.Executor.SparkPodSpec, task)
+	if task.Conf.Env == nil {
+		return fmt.Errorf("job env for mainAppFile, mainClass, or arguments is nil")
+	}
+	// mainAppFile, mainClass and arguments
+	sparkMainFile, find := task.Conf.Env[pfschema.EnvJobSparkMainFile]
+	if find {
+		jobApp.Spec.MainApplicationFile = &sparkMainFile
+	}
+	sparkMainClass, find := task.Conf.Env[pfschema.EnvJobSparkMainClass]
+	if find {
+		jobApp.Spec.MainClass = &sparkMainClass
+	}
+	sparkArguments, find := task.Conf.Env[pfschema.EnvJobSparkArguments]
+	if find {
+		jobApp.Spec.Arguments = []string{sparkArguments}
+	}
+	err := sj.buildSparkPodSpec(&jobApp.Spec.Driver.SparkPodSpec, task)
 	if err != nil {
 		log.Errorf("patch SparkPodSpec for driver failed, err: %s", err)
 		return err
 	}
+	// image
+	jobApp.Spec.Image = &task.Conf.Image
 	if task.Name != "" {
 		jobApp.Spec.Driver.PodName = &task.Name
 	}

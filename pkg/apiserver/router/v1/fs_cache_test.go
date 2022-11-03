@@ -40,7 +40,7 @@ func mockFSCache() model.FSCacheConfig {
 	return model.FSCacheConfig{
 		FsID:           mockFsID,
 		CacheDir:       "/abs/path",
-		MetaDriver:     "leveldb",
+		MetaDriver:     "disk",
 		BlockSize:      666,
 		ExtraConfigMap: map[string]string{"abc": "def"},
 	}
@@ -52,14 +52,14 @@ func buildCreateReq(model model.FSCacheConfig) fs.CreateFileSystemCacheRequest {
 		FsName:      mockFsName,
 		FsID:        model.FsID,
 		CacheDir:    model.CacheDir,
-		MetaDriver:  "leveldb",
+		MetaDriver:  "disk",
 		BlockSize:   model.BlockSize,
 		ExtraConfig: map[string]string{"aa": "bb"},
 	}
 	return req
 }
 
-func TestFSCacheConfigRouter(t *testing.T) {
+func TestRouter_FSCacheConfig(t *testing.T) {
 	router, baseUrl := prepareDBAndAPI(t)
 	mockFs := mockFS()
 	cacheConf := mockFSCache()
@@ -109,4 +109,40 @@ func TestFSCacheConfigRouter(t *testing.T) {
 	result, err = PerformDeleteRequest(router, urlWithFsID)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNotFound, result.Code)
+
+	// test create failure - wrong driver
+	createRep.MetaDriver = "notValid"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
+
+	// test create failure - too high memory
+	createRep.Resource.MemoryLimit = "10Gi"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
+
+	// test create failure - negative memory
+	createRep.Resource.MemoryLimit = "-1Gi"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
+
+	// test create failure - too many cpu
+	createRep.Resource.CpuLimit = "4"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
+
+	// test create failure - 0 cpu
+	createRep.Resource.CpuLimit = "0"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
+
+	// test create failure - invalid
+	createRep.Resource.MemoryLimit = "ddff4"
+	result, err = PerformPostRequest(router, url, createRep)
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusBadRequest, result.Code)
 }

@@ -31,12 +31,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
-	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
 
+	"github.com/PaddlePaddle/PaddleFlow/pkg/apiserver/common"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/config"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/k8s"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/common/resources"
@@ -48,6 +50,7 @@ import (
 	_ "github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime_v2/job"
 	_ "github.com/PaddlePaddle/PaddleFlow/pkg/job/runtime_v2/queue"
 	"github.com/PaddlePaddle/PaddleFlow/pkg/storage"
+	"github.com/PaddlePaddle/PaddleFlow/pkg/trace_logger"
 )
 
 type KubeRuntime struct {
@@ -118,6 +121,79 @@ func (kr *KubeRuntime) Init() error {
 	return nil
 }
 
+func (kr *KubeRuntime) SubmitJob(job *api.PFJob) error {
+	if job == nil {
+		return fmt.Errorf("submit job failed, job is nil")
+	}
+	// add trace log point
+	jobID := job.ID
+	traceLogger := trace_logger.KeyWithUpdate(jobID)
+	msg := fmt.Sprintf("submit job[%v] to cluster[%s] queue[%s]", job.ID, kr.cluster.ID, job.QueueID)
+	log.Infof(msg)
+	traceLogger.Infof(msg)
+	// prepare kubernetes storage
+	traceLogger.Infof("prepare kubernetes storage")
+	jobFileSystems := job.Conf.GetAllFileSystem()
+	for _, task := range job.Tasks {
+		jobFileSystems = append(jobFileSystems, task.Conf.GetAllFileSystem()...)
+	}
+	for _, fs := range jobFileSystems {
+		if fs.Type == pfschema.PFSTypeLocal {
+			log.Infof("skip create pv/pvc, fs type is local")
+			continue
+		}
+		fsID := common.ID(job.UserName, fs.Name)
+		pvName, err := kr.CreatePV(job.Namespace, fsID)
+		if err != nil {
+			log.Errorf("create pv for job[%s] failed, err: %v", job.ID, err)
+			return err
+		}
+		msg = fmt.Sprintf("SubmitJob CreatePV fsID=%s pvName=%s", fsID, pvName)
+		log.Infof(msg)
+		traceLogger.Infof(msg)
+		err = kr.CreatePVC(job.Namespace, fsID, pvName)
+		if err != nil {
+			log.Errorf("create pvc for job[%s] failed, err: %v", job.ID, err)
+			return err
+		}
+	}
+	// submit job
+	traceLogger.Infof("submit kubernetes job")
+	fwVersion := kr.Client().JobFrameworkVersion(job.JobType, job.Framework)
+	err := kr.Job(fwVersion).Submit(context.TODO(), job)
+	if err != nil {
+		log.Warnf("create kubernetes job[%s] failed, err: %v", job.Name, err)
+		return err
+	}
+	traceLogger.Infof("submit kubernetes job[%s] successful", job.ID)
+	log.Debugf("submit kubernetes job[%s] successful", jobID)
+	return nil
+}
+
+func (kr *KubeRuntime) StopJob(job *api.PFJob) error {
+	if job == nil {
+		return fmt.Errorf("stop job failed, job is nil")
+	}
+	fwVersion := kr.Client().JobFrameworkVersion(job.JobType, job.Framework)
+	return kr.Job(fwVersion).Stop(context.TODO(), job)
+}
+
+func (kr *KubeRuntime) UpdateJob(job *api.PFJob) error {
+	if job == nil {
+		return fmt.Errorf("update job failed, job is nil")
+	}
+	fwVersion := kr.Client().JobFrameworkVersion(job.JobType, job.Framework)
+	return kr.Job(fwVersion).Update(context.TODO(), job)
+}
+
+func (kr *KubeRuntime) DeleteJob(job *api.PFJob) error {
+	if job == nil {
+		return fmt.Errorf("delete job failed, job is nil")
+	}
+	fwVersion := kr.Client().JobFrameworkVersion(job.JobType, job.Framework)
+	return kr.Job(fwVersion).Delete(context.TODO(), job)
+}
+
 func (kr *KubeRuntime) Job(fwVersion pfschema.FrameworkVersion) framework.JobInterface {
 	jobPlugin, found := framework.GetJobPlugin(kr.cluster.Type, fwVersion)
 	if !found {
@@ -125,6 +201,41 @@ func (kr *KubeRuntime) Job(fwVersion pfschema.FrameworkVersion) framework.JobInt
 		return &framework.JobSample{}
 	}
 	return jobPlugin(kr.kubeClient)
+}
+
+func getQueueFrameworkVersion(quotaType string) pfschema.FrameworkVersion {
+	var gvk schema.GroupVersionKind
+	switch quotaType {
+	case pfschema.TypeVolcanoCapabilityQuota:
+		gvk = k8s.VCQueueGVK
+	case pfschema.TypeElasticQuota:
+		gvk = k8s.EQuotaGVK
+	}
+	return pfschema.NewFrameworkVersion(gvk.Kind, gvk.GroupVersion().String())
+}
+
+func (kr *KubeRuntime) CreateQueue(queue *api.QueueInfo) error {
+	if queue == nil {
+		return fmt.Errorf("create queue failed, queue is nil")
+	}
+	fwVersion := getQueueFrameworkVersion(queue.Type)
+	return kr.Queue(fwVersion).Create(context.TODO(), queue)
+}
+
+func (kr *KubeRuntime) UpdateQueue(queue *api.QueueInfo) error {
+	if queue == nil {
+		return fmt.Errorf("update queue failed, queue is nil")
+	}
+	fwVersion := getQueueFrameworkVersion(queue.Type)
+	return kr.Queue(fwVersion).Update(context.TODO(), queue)
+}
+
+func (kr *KubeRuntime) DeleteQueue(queue *api.QueueInfo) error {
+	if queue == nil {
+		return fmt.Errorf("delete queue failed, queue is nil")
+	}
+	fwVersion := getQueueFrameworkVersion(queue.Type)
+	return kr.Queue(fwVersion).Delete(context.TODO(), queue)
 }
 
 func (kr *KubeRuntime) Queue(fwVersion pfschema.FrameworkVersion) framework.QueueInterface {
@@ -230,7 +341,7 @@ func (kr *KubeRuntime) UpdateObject(obj *unstructured.Unstructured) error {
 	return nil
 }
 
-func (kr *KubeRuntime) GetObject(namespace, name string, gvk k8sschema.GroupVersionKind) (interface{}, error) {
+func (kr *KubeRuntime) GetObject(namespace, name string, gvk schema.GroupVersionKind) (interface{}, error) {
 	log.Debugf("get kubernetes %s resource: %s/%s", gvk.String(), namespace, name)
 	resourceObj, err := kr.kubeClient.Get(namespace, name, client.KubeFrameworkVersion(gvk))
 	if err != nil {
@@ -240,7 +351,7 @@ func (kr *KubeRuntime) GetObject(namespace, name string, gvk k8sschema.GroupVers
 	return resourceObj, nil
 }
 
-func (kr *KubeRuntime) DeleteObject(namespace, name string, gvk k8sschema.GroupVersionKind) error {
+func (kr *KubeRuntime) DeleteObject(namespace, name string, gvk schema.GroupVersionKind) error {
 	log.Infof("delete kubernetes %s resource: %s/%s", gvk.String(), namespace, name)
 	if err := kr.kubeClient.Delete(namespace, name, client.KubeFrameworkVersion(gvk)); err != nil {
 		log.Errorf("delete kubernetes %s resource %s/%s failed, err: %v", gvk.String(), namespace, name, err.Error())
@@ -404,8 +515,12 @@ func (kr *KubeRuntime) getPersistentVolume(name string, getOptions metav1.GetOpt
 }
 
 func (kr *KubeRuntime) createPersistentVolumeClaim(namespace string, pvc *corev1.PersistentVolumeClaim) (*corev1.
-	PersistentVolumeClaim, error) {
+PersistentVolumeClaim, error) {
 	return kr.clientset().CoreV1().PersistentVolumeClaims(namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
+}
+
+func (kr *KubeRuntime) GetPersistentVolumeClaims(namespace, name string, getOptions metav1.GetOptions) (*corev1.PersistentVolumeClaim, error) {
+	return kr.clientset().CoreV1().PersistentVolumeClaims(namespace).Get(context.TODO(), name, getOptions)
 }
 
 func (kr *KubeRuntime) DeletePersistentVolumeClaim(namespace string, name string,
@@ -413,8 +528,37 @@ func (kr *KubeRuntime) DeletePersistentVolumeClaim(namespace string, name string
 	return kr.clientset().CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), name, deleteOptions)
 }
 
+func (kr *KubeRuntime) PatchPVCFinalizerNull(namespace, name string) error {
+	type patchStruct struct {
+		Op    string   `json:"op"`
+		Path  string   `json:"path"`
+		Value []string `json:"value"`
+	}
+	payload := []patchStruct{{
+		Op:    "replace",
+		Path:  "/metadata/finalizers",
+		Value: nil,
+	}}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("parse pvc[%s-%s] finalizer null error: %v", namespace, name, err)
+		return err
+	}
+	if err := kr.patchPersistentVolumeClaim(namespace, name, payloadBytes); err != nil {
+		log.Errorf("patch pvc[%s-%s] [%s] error: %v", namespace, name, string(payloadBytes), err)
+		return err
+	}
+	return nil
+}
+
+func (kr *KubeRuntime) patchPersistentVolumeClaim(namespace, name string, data []byte) error {
+	_, err := kr.clientset().CoreV1().PersistentVolumeClaims(namespace).
+		Patch(context.TODO(), name, types.JSONPatchType, data, metav1.PatchOptions{})
+	return err
+}
+
 func (kr *KubeRuntime) getPersistentVolumeClaim(namespace, name string, getOptions metav1.GetOptions) (*corev1.
-	PersistentVolumeClaim, error) {
+PersistentVolumeClaim, error) {
 	return kr.clientset().CoreV1().PersistentVolumeClaims(namespace).Get(context.TODO(), name, getOptions)
 }
 
